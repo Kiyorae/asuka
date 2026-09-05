@@ -21,7 +21,7 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Restore
-        run: dotnet restore Matcha.slnx -p:Platform=x64
+        run: dotnet restore Asuka.slnx -p:Platform=x64
 
       - name: Reject browser-engine application code
         shell: pwsh
@@ -34,23 +34,23 @@ jobs:
           if ($LASTEXITCODE -ne 1) { throw 'Source audit failed.' }
 
       - name: Format
-        run: dotnet format Matcha.slnx --verify-no-changes --no-restore
+        run: dotnet format Asuka.slnx --verify-no-changes --no-restore
 
       - name: Build ARM64
         shell: pwsh
         run: |
-          dotnet restore src/Matcha.App/Matcha.App.csproj -p:Platform=ARM64
+          dotnet restore src/Asuka.App/Asuka.App.csproj -p:Platform=ARM64
           if ($LASTEXITCODE -ne 0) { throw 'ARM64 restore failed.' }
-          dotnet build src/Matcha.App/Matcha.App.csproj --configuration Release --no-restore -p:Platform=ARM64 -nodeReuse:false
+          dotnet build src/Asuka.App/Asuka.App.csproj --configuration Release --no-restore -p:Platform=ARM64 -nodeReuse:false
           if ($LASTEXITCODE -ne 0) { throw 'ARM64 build failed.' }
-          dotnet restore Matcha.slnx -p:Platform=x64
+          dotnet restore Asuka.slnx -p:Platform=x64
           if ($LASTEXITCODE -ne 0) { throw 'x64 restore failed after ARM64 validation.' }
 
       - name: Build
-        run: dotnet build Matcha.slnx --no-restore -p:Platform=x64
+        run: dotnet build Asuka.slnx --no-restore -p:Platform=x64
 
       - name: Test
-        run: dotnet test tests/Matcha.Tests/Matcha.Tests.csproj --no-build --no-restore -p:Platform=x64
+        run: dotnet test tests/Asuka.Tests/Asuka.Tests.csproj --no-build --no-restore -p:Platform=x64
 
       - name: Build and verify Windows 11 unsigned development MSIX
         shell: pwsh

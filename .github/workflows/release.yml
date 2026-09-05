@@ -55,25 +55,25 @@ jobs:
 
           [xml] $props = Get-Content -LiteralPath Directory.Build.props -Raw
           $declaredVersions = @(
-            $props.Project.PropertyGroup.MatchaVersion |
+            $props.Project.PropertyGroup.AsukaVersion |
               ForEach-Object { [string] $_ } |
               Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
           )
           if ($declaredVersions.Count -ne 1 -or $declaredVersions[0] -cne $version) {
-            throw "Directory.Build.props must declare exactly MatchaVersion '$version'."
+            throw "Directory.Build.props must declare exactly AsukaVersion '$version'."
           }
 
-          [xml] $packageManifest = Get-Content -LiteralPath src/Matcha.App/Package.appxmanifest -Raw
+          [xml] $packageManifest = Get-Content -LiteralPath src/Asuka.App/Package.appxmanifest -Raw
           $packageVersion = [string] $packageManifest.Package.Identity.Version
-          [xml] $desktopManifest = Get-Content -LiteralPath src/Matcha.App/app.manifest -Raw
+          [xml] $desktopManifest = Get-Content -LiteralPath src/Asuka.App/app.manifest -Raw
           $desktopVersion = [string] $desktopManifest.assembly.assemblyIdentity.version
           if ($packageVersion -cne $version -or $desktopVersion -cne $version) {
             throw "Manifest versions must both equal '$version' (MSIX='$packageVersion', desktop='$desktopVersion')."
           }
 
           $protocolVersions = foreach ($path in @(
-            'src/Matcha.Protocols/OneBotProtocol.cs',
-            'src/Matcha.Protocols/MilkyProtocol.cs'
+            'src/Asuka.Protocols/OneBotProtocol.cs',
+            'src/Asuka.Protocols/MilkyProtocol.cs'
           )) {
             $match = [regex]::Match(
               (Get-Content -LiteralPath $path -Raw),
@@ -144,8 +144,8 @@ jobs:
           ./scripts/package-release.ps1 -Platform ARM64 -Configuration Release -Version $env:VERSION -OutputDirectory $output
 
           $expectedNames = @(
-            "Matcha-v$env:VERSION-windows-x64-unsigned.zip",
-            "Matcha-v$env:VERSION-windows-arm64-unsigned.zip"
+            "Asuka-v$env:VERSION-windows-x64-unsigned.zip",
+            "Asuka-v$env:VERSION-windows-arm64-unsigned.zip"
           )
           $archives = @(Get-ChildItem -LiteralPath $output -File -Filter '*.zip' | Sort-Object Name)
           $unexpected = @($archives.Name | Where-Object { $_ -notin $expectedNames })
@@ -212,8 +212,8 @@ jobs:
         run: |
           set -euo pipefail
           expected=(
-            "Matcha-v${VERSION}-windows-x64-unsigned.zip"
-            "Matcha-v${VERSION}-windows-arm64-unsigned.zip"
+            "Asuka-v${VERSION}-windows-x64-unsigned.zip"
+            "Asuka-v${VERSION}-windows-arm64-unsigned.zip"
             "SHA256SUMS"
           )
           mapfile -t actual < <(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
@@ -278,7 +278,7 @@ jobs:
           verify_published_release() {
             jq -e \
               --arg tag "$RELEASE_TAG" \
-              --arg title "Matcha $RELEASE_TAG — unsigned preview" \
+              --arg title "Asuka $RELEASE_TAG — unsigned preview" \
               '.draft == false and .immutable == true and .prerelease == false and .tag_name == $tag and .name == $title and .author.login == "github-actions[bot]"' \
               <<<"$published_json" >/dev/null || return 1
             jq -j '.body' <<<"$published_json" > published-release-notes.md || return 1
@@ -315,7 +315,7 @@ jobs:
             exit 1
           fi
 
-          marker="<!-- matcha-windows-release-workflow:v1 source_sha=${SOURCE_SHA} -->"
+          marker="<!-- asuka-windows-release-workflow:v1 source_sha=${SOURCE_SHA} -->"
           {
             printf '%s\n\n' "$marker"
             cat <<'EOF'
@@ -336,7 +336,7 @@ jobs:
               <<<"$release_json" >/dev/null; then
               gh release edit "$RELEASE_TAG" \
                 --repo "$GITHUB_REPOSITORY" \
-                --title "Matcha $RELEASE_TAG — unsigned preview" \
+                --title "Asuka $RELEASE_TAG — unsigned preview" \
                 --notes-file release-notes.md
             elif jq -e \
               --arg tag "$RELEASE_TAG" \
@@ -362,7 +362,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --draft \
-              --title "Matcha $RELEASE_TAG — unsigned preview" \
+              --title "Asuka $RELEASE_TAG — unsigned preview" \
               --notes-file release-notes.md
           fi
 
