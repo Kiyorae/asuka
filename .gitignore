@@ -1,0 +1,17 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+*.nupkg
+artifacts/
+dist/
+TestResults/
+*.db
+*.db-shm
+*.db-wal
+*.pfx
+*.p12
+AppPackages/
+BundleArtifacts/
