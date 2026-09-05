@@ -104,17 +104,17 @@ $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $propsPath = Join-Path $repositoryRoot 'Directory.Build.props'
 $packageScript = Join-Path $PSScriptRoot 'package.ps1'
 $unsignedInstaller = Join-Path $PSScriptRoot 'install-unsigned.ps1'
-$releaseInstaller = Join-Path $PSScriptRoot 'release\Install-Matcha.ps1'
+$releaseInstaller = Join-Path $PSScriptRoot 'release\Install-Asuka.ps1'
 $releaseReadme = Join-Path $PSScriptRoot 'release\README-Windows.txt'
 $licensePath = Join-Path $repositoryRoot 'LICENSE'
 
 if (-not (Test-Path -LiteralPath $propsPath -PathType Leaf)) { Fail 'Directory.Build.props was not found' }
 $propsText = [IO.File]::ReadAllText($propsPath)
-$versionMatches = [regex]::Matches($propsText, '<MatchaVersion>\s*([^<\s]+)\s*</MatchaVersion>')
-if ($versionMatches.Count -ne 1) { Fail 'Directory.Build.props must contain exactly one MatchaVersion element' }
+$versionMatches = [regex]::Matches($propsText, '<AsukaVersion>\s*([^<\s]+)\s*</AsukaVersion>')
+if ($versionMatches.Count -ne 1) { Fail 'Directory.Build.props must contain exactly one AsukaVersion element' }
 $declaredVersion = $versionMatches[0].Groups[1].Value
 if ($declaredVersion -cne $Version) {
-    Fail "requested Version '$Version' does not match Directory.Build.props MatchaVersion '$declaredVersion'"
+    Fail "requested Version '$Version' does not match Directory.Build.props AsukaVersion '$declaredVersion'"
 }
 
 $releaseOutput = Get-FullPath $OutputDirectory $repositoryRoot
@@ -122,7 +122,7 @@ New-Item -ItemType Directory -Path $releaseOutput -Force | Out-Null
 if (-not (Test-Path -LiteralPath $releaseOutput -PathType Container)) { Fail "output directory '$releaseOutput' could not be created" }
 
 $releaseArchitecture = $Platform.ToLowerInvariant()
-$archiveName = "Matcha-v$Version-windows-$releaseArchitecture-unsigned.zip"
+$archiveName = "Asuka-v$Version-windows-$releaseArchitecture-unsigned.zip"
 $archivePath = Join-Path $releaseOutput $archiveName
 if (Test-Path -LiteralPath $archivePath) { Fail "refusing to overwrite existing release archive '$archivePath'" }
 
@@ -152,17 +152,17 @@ try {
         Fail "package.ps1 did not produce a usable MSIX at '$generatedMsix'"
     }
 
-    $msixName = "Matcha-v$Version-windows-$releaseArchitecture.msix"
+    $msixName = "Asuka-v$Version-windows-$releaseArchitecture.msix"
     $releaseFiles = @(
         $msixName,
         'install-unsigned.ps1',
-        'Install-Matcha.ps1',
+        'Install-Asuka.ps1',
         'README-Windows.txt',
         'LICENSE'
     )
     Copy-ReleaseFile $generatedMsix $msixName $stageRoot
     Copy-ReleaseFile $unsignedInstaller 'install-unsigned.ps1' $stageRoot
-    Copy-ReleaseFile $releaseInstaller 'Install-Matcha.ps1' $stageRoot
+    Copy-ReleaseFile $releaseInstaller 'Install-Asuka.ps1' $stageRoot
     Copy-ReleaseFile $releaseReadme 'README-Windows.txt' $stageRoot
     Copy-ReleaseFile $licensePath 'LICENSE' $stageRoot
     Write-ChecksumManifest $stageRoot $releaseFiles
@@ -171,7 +171,7 @@ try {
     # most manual installs. VerifyOnly is read-only and catches compatibility or
     # parameter-binding failures before an archive is published.
     $windowsPowerShell = Get-Command 'powershell.exe' -CommandType Application -ErrorAction Stop
-    & $windowsPowerShell.Source -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stageRoot 'Install-Matcha.ps1') -VerifyOnly
+    & $windowsPowerShell.Source -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stageRoot 'Install-Asuka.ps1') -VerifyOnly
     if ($LASTEXITCODE -ne 0) { Fail 'Windows PowerShell 5.1 installer verification failed' }
 
     # Compress-Archive receives only the staged root entries, so release ZIPs

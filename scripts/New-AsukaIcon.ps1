@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [string] $Source = (Join-Path $PSScriptRoot '..\src\Matcha.App\Assets\Akame.png'),
-    [string] $Destination = (Join-Path $PSScriptRoot '..\src\Matcha.App\Assets\Matcha.ico')
+    [string] $Source = (Join-Path $PSScriptRoot '..\src\Asuka.App\Assets\Akame.png'),
+    [string] $Destination = (Join-Path $PSScriptRoot '..\src\Asuka.App\Assets\Asuka.ico')
 )
 
 $ErrorActionPreference = 'Stop'

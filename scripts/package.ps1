@@ -15,8 +15,8 @@ $timestamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
 $nonce = [Guid]::NewGuid().ToString('N').Substring(0, 12)
 $outputRoot = Join-Path $repositoryRoot ("artifacts\msix\runs\{0}-{1}-{2}-{3}" -f $Platform, $Configuration, $timestamp, $nonce)
 $stageRoot = Join-Path $outputRoot 'project'
-$projectPath = Join-Path $stageRoot 'Matcha.App\Matcha.App.csproj'
-$developmentPublisher = 'CN=Matcha Development'
+$projectPath = Join-Path $stageRoot 'Asuka.App\Asuka.App.csproj'
+$developmentPublisher = 'CN=Asuka Development'
 # Microsoft-defined Windows 11 AllowUnsigned marker. This is deliberately a
 # fixed value, not a project-specific OID.
 $unsignedDevelopmentOid = 'OID.2.25.311729368913984317654407730594956997722=1'
@@ -61,7 +61,7 @@ function Test-SelfContainedMsix([string] $MsixPath, [bool] $ExpectUnsignedInstal
     $identity = $manifest.SelectSingleNode('/f:Package/f:Identity', $manager)
     $application = $manifest.SelectSingleNode('/f:Package/f:Applications/f:Application', $manager)
     $targetDeviceFamily = $manifest.SelectSingleNode('/f:Package/f:Dependencies/f:TargetDeviceFamily[@Name="Windows.Desktop"]', $manager)
-    if ($null -eq $identity -or $identity.Name -ne 'Matcha.Windows') { Fail 'generated manifest identity is not Matcha.Windows' }
+    if ($null -eq $identity -or $identity.Name -ne 'Asuka.Windows') { Fail 'generated manifest identity is not Asuka.Windows' }
     $expectedPublisher = if ($ExpectUnsignedInstallable) { $unsignedDevelopmentPublisher } else { $developmentPublisher }
     if ($identity.Publisher -cne $expectedPublisher) { Fail "generated publisher '$($identity.Publisher)' does not match expected '$expectedPublisher'" }
     if ($identity.Version -ne $PackageVersion) { Fail "generated manifest version '$($identity.Version)' does not match requested '$PackageVersion'" }
@@ -74,8 +74,8 @@ function Test-SelfContainedMsix([string] $MsixPath, [bool] $ExpectUnsignedInstal
     if ((-not $ExpectUnsignedInstallable) -and (-not $CertificateThumbprint) -and $hasSignature) { Fail 'unsigned verification package unexpectedly contains AppxSignature.p7x' }
     if ((-not $ExpectUnsignedInstallable) -and $CertificateThumbprint -and (-not $hasSignature)) { Fail 'signed package is missing AppxSignature.p7x' }
 
-    $runtimeConfigs = @($entries | Where-Object { $_ -match '(?i)(?:^|/)Matcha\.runtimeconfig\.json$' })
-    if ($runtimeConfigs.Count -ne 1) { Fail "expected one Matcha.runtimeconfig.json, found $($runtimeConfigs.Count)" }
+    $runtimeConfigs = @($entries | Where-Object { $_ -match '(?i)(?:^|/)Asuka\.runtimeconfig\.json$' })
+    if ($runtimeConfigs.Count -ne 1) { Fail "expected one Asuka.runtimeconfig.json, found $($runtimeConfigs.Count)" }
     $runtimeConfigText = Read-ZipEntryText $MsixPath $runtimeConfigs[0]
     if ($runtimeConfigText -match '"frameworks"') { Fail 'runtimeconfig declares a framework dependency; package is not self-contained' }
     if ($runtimeConfigText -notmatch 'includedFrameworks') { Fail 'runtimeconfig has no includedFrameworks marker for a self-contained deployment' }
@@ -104,8 +104,8 @@ if ($CertificateThumbprint) {
 
 Push-Location $repositoryRoot
 try {
-    Copy-SourceTree 'Matcha.Core'; Copy-SourceTree 'Matcha.Protocols'; Copy-SourceTree 'Matcha.App'
-    $stagedManifestPath = Join-Path $stageRoot 'Matcha.App\Package.appxmanifest'
+    Copy-SourceTree 'Asuka.Core'; Copy-SourceTree 'Asuka.Protocols'; Copy-SourceTree 'Asuka.App'
+    $stagedManifestPath = Join-Path $stageRoot 'Asuka.App\Package.appxmanifest'
     $stagedManifest = [System.IO.File]::ReadAllText($stagedManifestPath, [System.Text.Encoding]::UTF8)
     $identityVersionPattern = '(<Identity\s+[\s\S]*?Version=")[^"]+(")'
     if (-not [regex]::IsMatch($stagedManifest, $identityVersionPattern)) { Fail 'could not locate Identity Version in staged Package.appxmanifest' }
@@ -120,7 +120,7 @@ try {
     $buildArguments = @(
         'build', $projectPath, '--configuration', $Configuration, ("-p:Platform={0}" -f $Platform),
         '-p:GenerateAppxPackageOnBuild=true', '-p:AppxSymbolPackageEnabled=false', '-p:AppxBundle=Never',
-        ("-p:AppxPackageDir={0}\\" -f $outputRoot), ("-p:AppxPackageName=Matcha-{0}-{1}" -f $Platform, $Configuration),
+        ("-p:AppxPackageDir={0}\\" -f $outputRoot), ("-p:AppxPackageName=Asuka-{0}-{1}" -f $Platform, $Configuration),
         '-p:WindowsAppSDKSelfContained=true', '-p:SelfContained=true', '-nodeReuse:false'
     ) + $signingArguments
     & dotnet @buildArguments
@@ -128,7 +128,7 @@ try {
     $packages = @(Get-ChildItem -LiteralPath $outputRoot -File -Recurse -Filter '*.msix')
     if ($packages.Count -ne 1) { Fail "expected exactly one fresh .msix in isolated output, found $($packages.Count)" }
     $package = $packages[0]
-    if ($package.Name -ne ("Matcha-{0}-{1}.msix" -f $Platform, $Configuration)) { Fail "package name '$($package.Name)' does not match platform/configuration '$Platform/$Configuration'" }
+    if ($package.Name -ne ("Asuka-{0}-{1}.msix" -f $Platform, $Configuration)) { Fail "package name '$($package.Name)' does not match platform/configuration '$Platform/$Configuration'" }
     if ($package.Length -le 0) { Fail 'package is empty' }
     $evidence = Test-SelfContainedMsix $package.FullName $UnsignedInstallable
     $sha256 = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash
@@ -140,7 +140,7 @@ try {
         UnsignedInstallable = [bool]$UnsignedInstallable; Sha256 = $sha256
     }
     if ($UnsignedInstallable) {
-        Write-Warning 'This is an unsigned Windows 11 preview/testing package. Its Publisher/package family intentionally differs from signed Matcha releases; do not treat it as a production or broadly distributed release.'
+        Write-Warning 'This is an unsigned Windows 11 preview/testing package. Its Publisher/package family intentionally differs from signed Asuka releases; do not treat it as a production or broadly distributed release.'
         Write-Host ("Verify:  .\scripts\install-unsigned.ps1 -Package '{0}' -ExpectedSha256 {1} -VerifyOnly" -f $package.FullName, $sha256)
         Write-Host ("Install: .\scripts\install-unsigned.ps1 -Package '{0}' -ExpectedSha256 {1}" -f $package.FullName, $sha256)
     }

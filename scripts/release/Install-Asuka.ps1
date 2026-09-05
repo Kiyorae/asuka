@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function Fail([string] $Message) {
-    throw "Matcha release package refused: $Message"
+    throw "Asuka release package refused: $Message"
 }
 
 function Get-ExactlyOneFile([string] $Directory, [string] $Filter, [string] $Description) {
@@ -26,7 +26,7 @@ if ([string]::IsNullOrWhiteSpace($releaseDirectory) -or -not (Test-Path -Literal
     Fail 'could not resolve the release directory'
 }
 
-$package = Get-ExactlyOneFile -Directory $releaseDirectory -Filter 'Matcha-*.msix' -Description 'Matcha-*.msix package'
+$package = Get-ExactlyOneFile -Directory $releaseDirectory -Filter 'Asuka-*.msix' -Description 'Asuka-*.msix package'
 $checksums = Get-ExactlyOneFile -Directory $releaseDirectory -Filter 'SHA256SUMS' -Description 'SHA256SUMS file'
 $installer = Get-ExactlyOneFile -Directory $releaseDirectory -Filter 'install-unsigned.ps1' -Description 'install-unsigned.ps1 script'
 $readme = Get-ExactlyOneFile -Directory $releaseDirectory -Filter 'README-Windows.txt' -Description 'README-Windows.txt file'

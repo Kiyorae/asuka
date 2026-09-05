@@ -10,7 +10,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$developmentPublisher = 'CN=Matcha Development, OID.2.25.311729368913984317654407730594956997722=1'
+$developmentPublisher = 'CN=Asuka Development, OID.2.25.311729368913984317654407730594956997722=1'
 $expectedHash = $ExpectedSha256.ToUpperInvariant()
 
 function Fail([string] $Message) { throw "Unsigned MSIX installation refused: $Message" }
@@ -61,11 +61,11 @@ function Test-UnsignedPackage([string] $PackagePath) {
     $identity = $manifest.SelectSingleNode('/f:Package/f:Identity', $manager)
     $application = $manifest.SelectSingleNode('/f:Package/f:Applications/f:Application', $manager)
     $targetDeviceFamily = $manifest.SelectSingleNode('/f:Package/f:Dependencies/f:TargetDeviceFamily[@Name="Windows.Desktop"]', $manager)
-    if ($null -eq $identity -or $identity.Name -cne 'Matcha.Windows') { Fail 'package identity Name is not Matcha.Windows' }
+    if ($null -eq $identity -or $identity.Name -cne 'Asuka.Windows') { Fail 'package identity Name is not Asuka.Windows' }
     if ($identity.Publisher -cne $developmentPublisher -or $identity.Publisher -notmatch '(?:^|,\s*)OID\.2\.25\.311729368913984317654407730594956997722=1(?:,|$)') {
         Fail 'publisher is not the dedicated Microsoft AllowUnsigned development identity'
     }
-    if ($null -eq $application -or $application.EntryPoint -cne 'Windows.FullTrustApplication') { Fail 'package is not a Matcha full-trust application' }
+    if ($null -eq $application -or $application.EntryPoint -cne 'Windows.FullTrustApplication') { Fail 'package is not a Asuka full-trust application' }
     if ($null -eq $targetDeviceFamily -or [string]::IsNullOrWhiteSpace($targetDeviceFamily.MinVersion)) {
         Fail 'package has no Windows.Desktop minimum-version declaration'
     }
@@ -172,7 +172,7 @@ function Get-StreamSha256([IO.Stream] $Stream) {
 }
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or [Environment]::OSVersion.Version.Build -lt 26100) {
-    Fail 'Windows 11 version 24H2 (build 26100) or newer is required for this Matcha package.'
+    Fail 'Windows 11 version 24H2 (build 26100) or newer is required for this Asuka package.'
 }
 $resolvedPackage = Resolve-Path -LiteralPath $Package -ErrorAction Stop
 if ($resolvedPackage.Count -ne 1 -or -not (Test-Path -LiteralPath $resolvedPackage.Path -PathType Leaf)) { Fail 'the package path must resolve to exactly one file' }
@@ -204,8 +204,8 @@ if (-not (Test-ElevatedAdministrator)) {
 $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
 if ([string]::IsNullOrWhiteSpace($programFiles) -or -not (Test-Path -LiteralPath $programFiles -PathType Container)) { Fail 'the Program Files staging parent is unavailable' }
 Test-ProtectedStagingParent $programFiles
-$stagingDirectory = Join-Path $programFiles ('Matcha-AllowUnsigned-' + [Guid]::NewGuid().ToString('N'))
-$stagingPackage = Join-Path $stagingDirectory 'Matcha-AllowUnsigned.msix'
+$stagingDirectory = Join-Path $programFiles ('Asuka-AllowUnsigned-' + [Guid]::NewGuid().ToString('N'))
+$stagingPackage = Join-Path $stagingDirectory 'Asuka-AllowUnsigned.msix'
 $sourceStream = $null
 $stagingWriteStream = $null
 $stagingReadLock = $null
@@ -224,7 +224,7 @@ try {
     $sourceEvidence = Test-UnsignedPackage $resolvedPackage.Path
     $sourceVersion = [version][string]$sourceEvidence.Identity.Version
     $newerDevelopmentPackages = @(
-        Get-AppxPackage -Name 'Matcha.Windows' -ErrorAction Stop |
+        Get-AppxPackage -Name 'Asuka.Windows' -ErrorAction Stop |
             Where-Object {
                 $_.Publisher -ceq $developmentPublisher -and
                 [version][string]$_.Version -gt $sourceVersion
@@ -232,7 +232,7 @@ try {
     )
     if ($newerDevelopmentPackages.Count -ne 0) {
         $installedVersions = @($newerDevelopmentPackages | ForEach-Object { [string]$_.Version } | Sort-Object -Unique)
-        Fail "a newer unsigned Matcha development identity is already installed ($($installedVersions -join ', ')); Windows does not permit package downgrades"
+        Fail "a newer unsigned Asuka development identity is already installed ($($installedVersions -join ', ')); Windows does not permit package downgrades"
     }
     $sourceStream.Position = 0
     $stagingWriteStream = [IO.FileStream]::new($stagingPackage, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -248,7 +248,7 @@ try {
 
     $stagedEvidence = Test-UnsignedPackage $stagingPackage
     if ($stagedEvidence.Identity.Version -cne $sourceEvidence.Identity.Version) { Fail 'secure staging package version changed during verification' }
-    Write-Warning 'Installing the dedicated unsigned Matcha development identity from protected staging. This does not trust certificates and is not a way to bypass signatures on other packages.'
+    Write-Warning 'Installing the dedicated unsigned Asuka development identity from protected staging. This does not trust certificates and is not a way to bypass signatures on other packages.'
     Add-AppxPackage -AllowUnsigned -Path $stagingPackage
 } finally {
     if ($null -ne $stagingReadLock) { $stagingReadLock.Dispose() }
