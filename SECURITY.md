@@ -2,7 +2,7 @@
 
 ## Network boundary
 
-Matcha 模拟的是整个平台控制面。默认只监听 `127.0.0.1`，首次启动会生成 256-bit 随机 Access Token；包括 loopback 在内的服务端模式默认都要求认证。所有带 `Origin` 的 HTTP/WebSocket 请求都会被拒绝，因为协议端点只面向原生 Bot 客户端，不是浏览器 API。
+Asuka 模拟的是整个平台控制面。默认只监听 `127.0.0.1`，首次启动会生成 256-bit 随机 Access Token；包括 loopback 在内的服务端模式默认都要求认证。所有带 `Origin` 的 HTTP/WebSocket 请求都会被拒绝，因为协议端点只面向原生 Bot 客户端，不是浏览器 API。
 
 当前内置监听和反向 WebSocket 使用明文 `http/ws`，因此非 loopback 地址默认 fail-closed；非 loopback HTTP WebHook 同样被拒绝，必须改用 HTTPS。`AllowInsecureRemoteAccess` 只为隔离测试网络提供显式危险覆盖，不会由普通界面自动启用。需要跨主机或容器连接时，应使用可信 TLS 终结、VPN/隧道，并确认 Windows Defender Firewall 仅开放必要网络。
 
@@ -10,7 +10,7 @@ OneBot 和 Milky 的鉴权使用精确 Token 比较。Milky API 的查询参数�
 
 ## Local files and media
 
-正式构建是 MSIX `Windows.FullTrustApplication`。用户通过原生 Picker 选择的本地文件会复制到 Windows 管理的包 `LocalCache\assets`，以 SHA-256 内容寻址；unpackaged 调试配置仍回退到 `%LOCALAPPDATA%\Matcha\Cache\assets`。协议传入的绝对路径、`file:` URI、UNC 与设备路径不会被读取；本地文件权限只授予用户主动选择的可信应用流程。
+正式构建是 MSIX `Windows.FullTrustApplication`。用户通过原生 Picker 选择的本地文件会复制到 Windows 管理的包 `LocalCache\assets`，以 SHA-256 内容寻址；unpackaged 调试配置仍回退到 `%LOCALAPPDATA%\Asuka\Cache\assets`。协议传入的绝对路径、`file:` URI、UNC 与设备路径不会被读取；本地文件权限只授予用户主动选择的可信应用流程。
 
 远程媒体下载：
 
