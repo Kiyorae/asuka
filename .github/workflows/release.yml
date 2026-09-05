@@ -1,0 +1,399 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing vMAJOR.MINOR.BUILD.REVISION tag to publish
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release source
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+
+      - id: release
+        name: Verify tag and version declarations
+        shell: pwsh
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ($env:RELEASE_TAG -notmatch '^v(?:0|[1-9][0-9]{0,4})(?:\.(?:0|[1-9][0-9]{0,4})){3}$') {
+            throw "Release tag '$env:RELEASE_TAG' must use vMAJOR.MINOR.BUILD.REVISION without leading zeroes."
+          }
+
+          $version = $env:RELEASE_TAG.Substring(1)
+          foreach ($part in $version.Split('.')) {
+            if ([uint32]::Parse($part) -gt 65535) {
+              throw "Version component '$part' exceeds the MSIX limit of 65535."
+            }
+          }
+
+          [xml] $props = Get-Content -LiteralPath Directory.Build.props -Raw
+          $declaredVersions = @(
+            $props.Project.PropertyGroup.MatchaVersion |
+              ForEach-Object { [string] $_ } |
+              Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          )
+          if ($declaredVersions.Count -ne 1 -or $declaredVersions[0] -cne $version) {
+            throw "Directory.Build.props must declare exactly MatchaVersion '$version'."
+          }
+
+          [xml] $packageManifest = Get-Content -LiteralPath src/Matcha.App/Package.appxmanifest -Raw
+          $packageVersion = [string] $packageManifest.Package.Identity.Version
+          [xml] $desktopManifest = Get-Content -LiteralPath src/Matcha.App/app.manifest -Raw
+          $desktopVersion = [string] $desktopManifest.assembly.assemblyIdentity.version
+          if ($packageVersion -cne $version -or $desktopVersion -cne $version) {
+            throw "Manifest versions must both equal '$version' (MSIX='$packageVersion', desktop='$desktopVersion')."
+          }
+
+          $protocolVersions = foreach ($path in @(
+            'src/Matcha.Protocols/OneBotProtocol.cs',
+            'src/Matcha.Protocols/MilkyProtocol.cs'
+          )) {
+            $match = [regex]::Match(
+              (Get-Content -LiteralPath $path -Raw),
+              'CurrentVersion\s*=\s*"(?<version>[^"]+)"',
+              [Text.RegularExpressions.RegexOptions]::CultureInvariant
+            )
+            if (-not $match.Success) { throw "Could not read CurrentVersion from '$path'." }
+            [pscustomobject]@{ Path = $path; Version = $match.Groups['version'].Value }
+          }
+          foreach ($protocol in $protocolVersions) {
+            if ($protocol.Version -cne $version) {
+              throw "Protocol version in '$($protocol.Path)' is '$($protocol.Version)', expected '$version'."
+            }
+          }
+
+          & git show-ref --verify --quiet "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw "Tag '$env:RELEASE_TAG' does not exist in the repository." }
+          $sourceSha = (& git rev-list -n 1 "$env:RELEASE_TAG" --).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sourceSha -notmatch '^[0-9a-f]{40}$') {
+            throw "Could not resolve '$env:RELEASE_TAG' to a commit."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:DEFAULT_BRANCH)) {
+            throw 'The repository default branch could not be determined.'
+          }
+          & git merge-base --is-ancestor $sourceSha "refs/remotes/origin/$env:DEFAULT_BRANCH"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tag '$env:RELEASE_TAG' is not reachable from the default branch '$env:DEFAULT_BRANCH'."
+          }
+          if ('${{ github.event_name }}' -eq 'push' -and $sourceSha -cne '${{ github.sha }}') {
+            throw "Pushed tag resolves to '$sourceSha', but the workflow source is '${{ github.sha }}'."
+          }
+
+          "release_tag=$env:RELEASE_TAG" >> $env:GITHUB_OUTPUT
+          "source_sha=$sourceSha" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+  package:
+    name: Build unsigned Windows release archives
+    needs: validate
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.source_sha }}
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Run quality checks
+        shell: pwsh
+        run: ./scripts/check.ps1
+
+      - name: Package x64 and ARM64 archives
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $PWD 'dist'
+          New-Item -ItemType Directory -Path $output -ErrorAction Stop | Out-Null
+
+          ./scripts/package-release.ps1 -Platform x64 -Configuration Release -Version $env:VERSION -OutputDirectory $output
+          ./scripts/package-release.ps1 -Platform ARM64 -Configuration Release -Version $env:VERSION -OutputDirectory $output
+
+          $expectedNames = @(
+            "Matcha-v$env:VERSION-windows-x64-unsigned.zip",
+            "Matcha-v$env:VERSION-windows-arm64-unsigned.zip"
+          )
+          $archives = @(Get-ChildItem -LiteralPath $output -File -Filter '*.zip' | Sort-Object Name)
+          $unexpected = @($archives.Name | Where-Object { $_ -notin $expectedNames })
+          $missing = @($expectedNames | Where-Object { $_ -notin $archives.Name })
+          if ($archives.Count -ne 2 -or $unexpected.Count -ne 0 -or $missing.Count -ne 0) {
+            throw "Release archives are not exact (missing: $($missing -join ', '); unexpected: $($unexpected -join ', '))."
+          }
+
+          $checksumLines = foreach ($archive in $archives) {
+            $hash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($archive.Name)"
+          }
+          [IO.File]::WriteAllText(
+            (Join-Path $output 'SHA256SUMS'),
+            ($checksumLines -join "`n") + "`n",
+            [Text.UTF8Encoding]::new($false)
+          )
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-${{ needs.validate.outputs.version }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - validate
+      - package
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+    permissions:
+      contents: write
+    steps:
+      - name: Require immutable release policy
+        shell: bash
+        env:
+          RELEASE_IMMUTABILITY_ENABLED: ${{ vars.RELEASE_IMMUTABILITY_ENABLED }}
+          RELEASE_TAGS_PROTECTED: ${{ vars.RELEASE_TAGS_PROTECTED }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_IMMUTABILITY_ENABLED" != 'true' ]]; then
+            echo 'Enable GitHub release immutability, then set RELEASE_IMMUTABILITY_ENABLED=true in the release environment.' >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_TAGS_PROTECTED" != 'true' ]]; then
+            echo 'Protect v* tags from updates/deletion, then set RELEASE_TAGS_PROTECTED=true in the release environment.' >&2
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets-${{ needs.validate.outputs.version }}
+          path: dist
+
+      - name: Verify release assets
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected=(
+            "Matcha-v${VERSION}-windows-x64-unsigned.zip"
+            "Matcha-v${VERSION}-windows-arm64-unsigned.zip"
+            "SHA256SUMS"
+          )
+          mapfile -t actual < <(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
+          mapfile -t wanted < <(printf '%s\n' "${expected[@]}" | sort)
+          diff -u <(printf '%s\n' "${wanted[@]}") <(printf '%s\n' "${actual[@]}")
+          (cd dist && sha256sum --check SHA256SUMS)
+
+      - name: Create verified release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          resolve_tag_commit() {
+            local object_json object_type object_sha
+            object_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+            object_type="$(jq -r '.object.type' <<<"$object_json")"
+            object_sha="$(jq -r '.object.sha' <<<"$object_json")"
+
+            for _ in {1..10}; do
+              case "$object_type" in
+                commit)
+                  [[ "$object_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+                  printf '%s\n' "$object_sha"
+                  return 0
+                  ;;
+                tag)
+                  object_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}")"
+                  object_type="$(jq -r '.object.type' <<<"$object_json")"
+                  object_sha="$(jq -r '.object.sha' <<<"$object_json")"
+                  ;;
+                *)
+                  return 1
+                  ;;
+              esac
+            done
+            return 1
+          }
+
+          verify_source_on_default_branch() {
+            local default_sha comparison_status
+            default_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${DEFAULT_BRANCH}" --jq '.object.sha')"
+            [[ "$default_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+            comparison_status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${SOURCE_SHA}...${default_sha}" --jq '.status')"
+            [[ "$comparison_status" == 'ahead' || "$comparison_status" == 'identical' ]]
+          }
+
+          verify_downloaded_assets() {
+            local directory="$1"
+            local -a downloaded_names
+            mapfile -t downloaded_names < <(find "$directory" -maxdepth 1 -type f -printf '%f\n' | sort)
+            diff -u <(printf '%s\n' "${local_names[@]}") <(printf '%s\n' "${downloaded_names[@]}") || return 1
+            cmp --silent dist/SHA256SUMS "$directory/SHA256SUMS" || return 1
+            (cd "$directory" && sha256sum --check SHA256SUMS) || return 1
+          }
+
+          verify_published_release() {
+            jq -e \
+              --arg tag "$RELEASE_TAG" \
+              --arg title "Matcha $RELEASE_TAG — unsigned preview" \
+              '.draft == false and .immutable == true and .prerelease == false and .tag_name == $tag and .name == $title and .author.login == "github-actions[bot]"' \
+              <<<"$published_json" >/dev/null || return 1
+            jq -j '.body' <<<"$published_json" > published-release-notes.md || return 1
+            cmp --silent release-notes.md published-release-notes.md || return 1
+
+            local -a published_names
+            mapfile -t published_names < <(jq -r '.assets[].name' <<<"$published_json" | sort)
+            diff -u <(printf '%s\n' "${local_names[@]}") <(printf '%s\n' "${published_names[@]}") || return 1
+            local local_asset asset_name local_digest local_size
+            for local_asset in dist/*; do
+              asset_name="$(basename "$local_asset")"
+              local_digest="sha256:$(sha256sum "$local_asset" | cut -d ' ' -f 1)"
+              local_size="$(stat -c '%s' "$local_asset")"
+              jq -e \
+                --arg name "$asset_name" \
+                --arg digest "$local_digest" \
+                --argjson size "$local_size" \
+                '[.assets[] | select(.name == $name and .state == "uploaded" and .digest == $digest and .size == $size)] | length == 1' \
+                <<<"$published_json" >/dev/null || return 1
+            done
+
+            remote_sha="$(resolve_tag_commit)" || return 1
+            [[ "$remote_sha" == "$SOURCE_SHA" ]] || return 1
+            verify_source_on_default_branch || return 1
+          }
+
+          remote_sha="$(resolve_tag_commit)"
+          if [[ "$remote_sha" != "$SOURCE_SHA" ]]; then
+            echo "Tag '$RELEASE_TAG' now resolves to '$remote_sha', not the validated source '$SOURCE_SHA'." >&2
+            exit 1
+          fi
+          if ! verify_source_on_default_branch; then
+            echo "Validated source '$SOURCE_SHA' is no longer reachable from '$DEFAULT_BRANCH'." >&2
+            exit 1
+          fi
+
+          marker="<!-- matcha-windows-release-workflow:v1 source_sha=${SOURCE_SHA} -->"
+          {
+            printf '%s\n\n' "$marker"
+            cat <<'EOF'
+          This release contains unsigned Windows 11 24H2 preview/testing packages for x64 and ARM64.
+
+          Download the ZIP for your architecture, verify it against the release `SHA256SUMS`, extract the complete archive, and read `README-Windows.txt`. Installation requires an elevated Administrator PowerShell session. These packages use Windows `AllowUnsigned`, have no publisher signature or SmartScreen reputation, and intentionally use an identity different from future signed releases. They are not a production distribution channel.
+          EOF
+          } > release-notes.md
+          mapfile -t local_names < <(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
+
+          if release_json="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" 2>/dev/null)"; then
+            if jq -e \
+              --arg tag "$RELEASE_TAG" \
+              --arg marker "$marker" \
+              '.draft == true and .prerelease == false and .tag_name == $tag and .author.login == "github-actions[bot]" and (.body | contains($marker))' \
+              <<<"$release_json" >/dev/null; then
+              gh release edit "$RELEASE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "Matcha $RELEASE_TAG — unsigned preview" \
+                --notes-file release-notes.md
+            elif jq -e \
+              --arg tag "$RELEASE_TAG" \
+              --arg marker "$marker" \
+              '.draft == false and .immutable == true and .tag_name == $tag and .author.login == "github-actions[bot]" and (.body | contains($marker))' \
+              <<<"$release_json" >/dev/null; then
+              published_json="$release_json"
+              if ! verify_published_release; then
+                echo "Existing immutable release '$RELEASE_TAG' does not match this build." >&2
+                exit 1
+              fi
+              mkdir published-assets
+              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir published-assets
+              verify_downloaded_assets published-assets
+              echo "Release '$RELEASE_TAG' is already published and exactly matches this build."
+              exit 0
+            else
+              echo "Release '$RELEASE_TAG' already exists and is not a recoverable workflow-owned draft." >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --title "Matcha $RELEASE_TAG — unsigned preview" \
+              --notes-file release-notes.md
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            dist/*.zip \
+            dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+          mkdir remote-assets
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir remote-assets
+          verify_downloaded_assets remote-assets
+
+          remote_sha="$(resolve_tag_commit)"
+          if [[ "$remote_sha" != "$SOURCE_SHA" ]]; then
+            echo "Tag '$RELEASE_TAG' moved before publication; leaving the verified assets in a draft." >&2
+            exit 1
+          fi
+          if ! verify_source_on_default_branch; then
+            echo "Default branch moved away from '$SOURCE_SHA'; leaving the verified assets in a draft." >&2
+            exit 1
+          fi
+
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          published_json="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+          if ! verify_published_release; then
+            if jq -e '.draft == false and .immutable != true' <<<"$published_json" >/dev/null; then
+              gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft
+            fi
+            echo "Published release did not satisfy the immutable release postcondition." >&2
+            exit 1
+          fi
