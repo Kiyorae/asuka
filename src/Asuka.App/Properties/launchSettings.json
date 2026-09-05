@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Asuka (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "Asuka (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

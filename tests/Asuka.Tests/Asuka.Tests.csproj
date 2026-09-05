@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Asuka.Tests</RootNamespace>
+    <AssemblyName>Asuka.Tests</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MSTest" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Asuka.Core/Asuka.Core.csproj" />
+    <ProjectReference Include="../../src/Asuka.Protocols/Asuka.Protocols.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Asuka.App/PersonaSelection.cs" Link="App/PersonaSelection.cs" />
+    <Compile Include="../../src/Asuka.App/LogEntryItem.cs" Link="App/LogEntryItem.cs" />
+    <Compile Include="../../src/Asuka.App/ActivityFilter.cs" Link="App/ActivityFilter.cs" />
+    <Compile Include="../../src/Asuka.App/CollectionSync.cs" Link="App/CollectionSync.cs" />
+    <Compile Include="../../src/Asuka.App/PageNavigationState.cs" Link="App/PageNavigationState.cs" />
+  </ItemGroup>
+</Project>

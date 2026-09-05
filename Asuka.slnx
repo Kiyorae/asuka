@@ -1,0 +1,26 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="ARM64" />
+  </Configurations>
+  <Project Path="src/Asuka.Core/Asuka.Core.csproj">
+    <Platform Solution="*|x64" Project="x64" />
+    <Platform Solution="*|ARM64" Project="ARM64" />
+  </Project>
+  <Project Path="src/Asuka.Protocols/Asuka.Protocols.csproj">
+    <Platform Solution="*|x64" Project="x64" />
+    <Platform Solution="*|ARM64" Project="ARM64" />
+  </Project>
+  <Project Path="src/Asuka.App/Asuka.App.csproj">
+    <Platform Solution="*|x64" Project="x64" />
+    <Platform Solution="*|ARM64" Project="ARM64" />
+    <Deploy Solution="*|x64" />
+    <Deploy Solution="*|ARM64" />
+  </Project>
+  <Folder Name="/tests/">
+    <Project Path="tests/Asuka.Tests/Asuka.Tests.csproj">
+      <Platform Solution="*|x64" Project="x64" />
+      <Platform Solution="*|ARM64" Project="ARM64" />
+    </Project>
+  </Folder>
+</Solution>

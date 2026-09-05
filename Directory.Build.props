@@ -1,10 +1,10 @@
 <Project>
   <PropertyGroup>
-    <MatchaVersion>0.1.0.1</MatchaVersion>
-    <Version>$(MatchaVersion)</Version>
-    <AssemblyVersion>$(MatchaVersion)</AssemblyVersion>
-    <FileVersion>$(MatchaVersion)</FileVersion>
-    <InformationalVersion>$(MatchaVersion)</InformationalVersion>
+    <AsukaVersion>0.1.0.1</AsukaVersion>
+    <Version>$(AsukaVersion)</Version>
+    <AssemblyVersion>$(AsukaVersion)</AssemblyVersion>
+    <FileVersion>$(AsukaVersion)</FileVersion>
+    <InformationalVersion>$(AsukaVersion)</InformationalVersion>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
