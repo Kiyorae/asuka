@@ -51,7 +51,7 @@
                         <TextBlock
                             VerticalAlignment="Center"
                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                            Text="正在准备原生工作区" />
+                            Text="Preparing the native workspace" />
                     </StackPanel>
                 </StackPanel>
             </Grid>
