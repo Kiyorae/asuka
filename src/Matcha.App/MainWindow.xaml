@@ -1,0 +1,845 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Matcha.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Matcha.App">
+    <Window.SystemBackdrop>
+        <MicaBackdrop />
+    </Window.SystemBackdrop>
+
+    <Grid x:Name="RootGrid" Background="Transparent">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <TitleBar
+            x:Name="AppTitleBar"
+            AutoRefreshDragRegions="True"
+            IsPaneToggleButtonVisible="True"
+            Subtitle="Native protocol workspace"
+            Title="Matcha">
+            <TitleBar.IconSource>
+                <ImageIconSource ImageSource="ms-appx:///Assets/Akame.png" />
+            </TitleBar.IconSource>
+        </TitleBar>
+
+        <NavigationView
+            x:Name="AppNavigationView"
+            Grid.Row="1"
+            Background="Transparent"
+            CompactPaneLength="48"
+            IsBackButtonVisible="Collapsed"
+            IsPaneOpen="True"
+            IsPaneToggleButtonVisible="False"
+            IsSettingsVisible="False"
+            IsTitleBarAutoPaddingEnabled="False"
+            OpenPaneLength="256"
+            PaneDisplayMode="Left">
+            <!-- Keep the native inline pane: opening it reserves space for the workspace. -->
+            <NavigationView.PaneCustomContent>
+                <Grid Height="64" Margin="4,4,4,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="40" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Button
+                        x:Name="ConnectButton"
+                        Width="40"
+                        Height="40"
+                        Padding="0"
+                        VerticalAlignment="Center"
+                        AutomationProperties.Name="Connect protocol"
+                        Style="{StaticResource SubtleButtonStyle}">
+                        <Grid Width="24" Height="24">
+                            <FontIcon x:Name="ConnectionActionIcon" FontSize="20" Glyph="&#xE7E8;" />
+                            <ProgressRing
+                                x:Name="ConnectionProgressRing"
+                                Width="20"
+                                Height="20"
+                                IsActive="False"
+                                Visibility="Collapsed" />
+                            <Grid
+                                x:Name="ConnectionStateIndicator"
+                                Width="8"
+                                Height="8"
+                                Margin="0,0,-2,-2"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Bottom"
+                                AutomationProperties.AccessibilityView="Raw">
+                                <Ellipse
+                                    x:Name="ConnectionStatusDot"
+                                    Fill="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <Ellipse
+                                    x:Name="ConnectionSuccessDot"
+                                    Fill="{ThemeResource SystemFillColorSuccessBrush}"
+                                    Visibility="Collapsed" />
+                                <Ellipse
+                                    x:Name="ConnectionCautionDot"
+                                    Fill="{ThemeResource SystemFillColorCautionBrush}"
+                                    Visibility="Collapsed" />
+                                <Ellipse
+                                    x:Name="ConnectionFailedDot"
+                                    Fill="{ThemeResource SystemFillColorCriticalBrush}"
+                                    Visibility="Collapsed" />
+                            </Grid>
+                        </Grid>
+                    </Button>
+                    <StackPanel
+                        x:Name="ConnectionDetailsPanel"
+                        Grid.Column="1"
+                        Margin="4,0,8,0"
+                        VerticalAlignment="Center"
+                        Spacing="2">
+                        <TextBlock
+                            x:Name="ConnectionProtocolText"
+                            FontWeight="SemiBold"
+                            Text="OneBot V11"
+                            TextTrimming="CharacterEllipsis" />
+                        <TextBlock
+                            x:Name="ConnectionStatusLabel"
+                            AutomationProperties.LiveSetting="Polite"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Style="{StaticResource CaptionTextBlockStyle}"
+                            Text="Offline"
+                            TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                </Grid>
+            </NavigationView.PaneCustomContent>
+
+            <NavigationView.MenuItems>
+                <NavigationViewItem
+                    x:Name="MessagesNavigationItem"
+                    Content="Messages"
+                    Tag="messages">
+                    <NavigationViewItem.Icon>
+                        <FontIcon x:Name="MessagesNavigationIcon" Glyph="&#xE8BD;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem
+                    x:Name="PeopleNavigationItem"
+                    Content="People &amp; groups"
+                    Tag="people">
+                    <NavigationViewItem.Icon>
+                        <FontIcon x:Name="PeopleNavigationIcon" Glyph="&#xE716;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+
+            <NavigationView.FooterMenuItems>
+                <NavigationViewItem
+                    x:Name="ActivityLogsNavigationItem"
+                    Content="Activity logs"
+                    Tag="logs">
+                    <NavigationViewItem.Icon>
+                        <FontIcon x:Name="ActivityLogsNavigationIcon" Glyph="&#xE8A5;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem
+                    x:Name="AccountNavigationItem"
+                    Content="Account &amp; bot"
+                    Tag="account"
+                    Visibility="Collapsed">
+                    <NavigationViewItem.Icon>
+                        <FontIcon x:Name="AccountNavigationIcon" Glyph="&#xE77B;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem
+                    x:Name="SettingsNavigationItem"
+                    Content="Settings"
+                    Tag="settings">
+                    <NavigationViewItem.Icon>
+                        <FontIcon x:Name="SettingsNavigationIcon" Glyph="&#xE713;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.FooterMenuItems>
+
+            <NavigationView.PaneFooter>
+                <StackPanel>
+                    <Border
+                        Height="1"
+                        Margin="12,8,12,4"
+                        Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+                    <Button
+                        x:Name="ProfileButton"
+                        Height="68"
+                        Margin="4,0"
+                        Padding="4,8"
+                        HorizontalContentAlignment="Stretch"
+                        AutomationProperties.Name="Open account and bot configuration"
+                        Style="{StaticResource SubtleButtonStyle}"
+                        ToolTipService.ToolTip="Account and bot configuration">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="32" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <PersonPicture
+                                x:Name="ProfilePicture"
+                                Width="32"
+                                Height="32"
+                                DisplayName="?" />
+                            <StackPanel
+                                x:Name="ProfileDetailsPanel"
+                                Grid.Column="1"
+                                Margin="8,0,0,0"
+                                VerticalAlignment="Center">
+                                <TextBlock
+                                    FontSize="11"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Current user" />
+                                <TextBlock
+                                    x:Name="ProfileNameText"
+                                    FontWeight="SemiBold"
+                                    TextTrimming="CharacterEllipsis" />
+                                <TextBlock
+                                    x:Name="ProfileIdText"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Style="{StaticResource CaptionTextBlockStyle}"
+                                    TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                            <FontIcon
+                                x:Name="ProfileChevron"
+                                Grid.Column="2"
+                                Margin="8,0,8,0"
+                                FontSize="12"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Glyph="&#xE76C;" />
+                        </Grid>
+                    </Button>
+                </StackPanel>
+            </NavigationView.PaneFooter>
+
+            <NavigationView.Content>
+                <Grid x:Name="WorkspaceLayout">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition x:Name="ConsoleRow" Height="0" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition x:Name="ProtocolPaneColumn" Width="0" />
+                    </Grid.ColumnDefinitions>
+
+                    <Grid x:Name="PageHost">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <Grid Margin="28,20,28,0" ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Grid x:Name="PageHeaderContent" ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Border
+                                    x:Name="PageIconHost"
+                                    Width="40"
+                                    Height="40"
+                                    VerticalAlignment="Top"
+                                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="10">
+                                    <FontIcon
+                                        x:Name="PageHeaderIcon"
+                                        FontSize="18"
+                                        Glyph="&#xE8BD;" />
+                                </Border>
+                                <StackPanel x:Name="PageTitlePanel" Grid.Column="1">
+                                    <TextBlock
+                                        x:Name="ChatTitleText"
+                                        Style="{StaticResource TitleTextBlockStyle}"
+                                        Text="Conversation"
+                                        TextTrimming="CharacterEllipsis" />
+                                    <TextBlock
+                                        x:Name="ChatSubtitleText"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Select a conversation"
+                                        TextTrimming="CharacterEllipsis" />
+                                    <TextBlock
+                                        x:Name="RoundTripTextBlock"
+                                        Margin="0,4,0,0"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Style="{StaticResource CaptionTextBlockStyle}"
+                                        Text="RTT unavailable" />
+                                </StackPanel>
+                            </Grid>
+                            <StackPanel
+                                x:Name="ConversationUtilityButtons"
+                                Grid.Column="1"
+                                VerticalAlignment="Top"
+                                Orientation="Horizontal"
+                                Spacing="6">
+                                <ToggleButton
+                                    x:Name="ToggleConsoleButton"
+                                    Width="38"
+                                    Height="38"
+                                    Padding="0"
+                                    AutomationProperties.Name="Toggle diagnostics console"
+                                    CornerRadius="19"
+                                    ToolTipService.ToolTip="Show or hide console (Ctrl+`)">
+                                    <FontIcon x:Name="ToggleConsoleIcon" Glyph="&#xE756;" />
+                                </ToggleButton>
+                                <ToggleButton
+                                    x:Name="ToggleProtocolPaneButton"
+                                    Width="38"
+                                    Height="38"
+                                    Padding="0"
+                                    AutomationProperties.Name="Toggle protocol inspector"
+                                    CornerRadius="19"
+                                    ToolTipService.ToolTip="Show or hide protocol inspector (Ctrl+Alt+I)">
+                                    <FontIcon x:Name="ToggleProtocolIcon" Glyph="&#xE89F;" />
+                                </ToggleButton>
+                            </StackPanel>
+                        </Grid>
+
+                        <Grid
+                            x:Name="MessagesPage"
+                            Grid.Row="1"
+                            Padding="28,8,28,20">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <Grid x:Name="MessageSurface" Margin="0,8,0,0">
+                                <ListView
+                                    x:Name="MessageList"
+                                    AutomationProperties.Name="Message transcript"
+                                    SelectionMode="Single" />
+                                <StackPanel
+                                    x:Name="EmptyChatState"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Spacing="8">
+                                    <FontIcon
+                                        HorizontalAlignment="Center"
+                                        FontSize="30"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Glyph="&#xE8BD;" />
+                                    <TextBlock
+                                        HorizontalAlignment="Center"
+                                        Style="{StaticResource SubtitleTextBlockStyle}"
+                                        Text="No conversation selected" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Choose a person or group to start messaging." />
+                                    <Button
+                                        x:Name="BrowsePeopleButton"
+                                        HorizontalAlignment="Center"
+                                        Content="Browse people &amp; groups" />
+                                </StackPanel>
+                                <Grid.ContextFlyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem
+                                            x:Name="CopyCurrentConversationIdMenuItem"
+                                            Text="Copy conversation ID" />
+                                        <MenuFlyoutItem
+                                            x:Name="ManageCurrentGroupMenuItem"
+                                            Text="Manage members" />
+                                        <MenuFlyoutSeparator />
+                                        <MenuFlyoutItem
+                                            x:Name="ClearHistoryMenuItem"
+                                            Text="Clear history" />
+                                        <MenuFlyoutItem
+                                            x:Name="RemoveCurrentConversationMenuItem"
+                                            Text="Remove conversation" />
+                                    </MenuFlyout>
+                                </Grid.ContextFlyout>
+                            </Grid>
+
+                            <Grid
+                                x:Name="ComposerPulseHost"
+                                Grid.Row="1"
+                                MaxWidth="960"
+                                Margin="0,14,0,0"
+                                HorizontalAlignment="Stretch">
+                                <Border
+                                    x:Name="ComposerBorder"
+                                    Padding="14"
+                                    HorizontalAlignment="Stretch"
+                                    AllowDrop="True"
+                                    CornerRadius="16"
+                                    Style="{StaticResource MatchaCardStyle}">
+                                    <Border.OpacityTransition>
+                                        <ScalarTransition Duration="0:0:0.16" />
+                                    </Border.OpacityTransition>
+                                    <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <ListView
+                                            x:Name="MentionList"
+                                            MaxHeight="64"
+                                            AutomationProperties.Name="Pending mentions"
+                                            DisplayMemberPath="Description">
+                                            <ListView.ItemContainerTransitions>
+                                                <TransitionCollection>
+                                                    <AddDeleteThemeTransition />
+                                                    <RepositionThemeTransition IsStaggeringEnabled="False" />
+                                                </TransitionCollection>
+                                            </ListView.ItemContainerTransitions>
+                                        </ListView>
+                                        <ListView
+                                            x:Name="AttachmentList"
+                                            Grid.Column="1"
+                                            MaxHeight="64"
+                                            AutomationProperties.Name="Pending attachments"
+                                            DisplayMemberPath="Description">
+                                            <ListView.ItemContainerTransitions>
+                                                <TransitionCollection>
+                                                    <AddDeleteThemeTransition />
+                                                    <RepositionThemeTransition IsStaggeringEnabled="False" />
+                                                </TransitionCollection>
+                                            </ListView.ItemContainerTransitions>
+                                        </ListView>
+                                        <StackPanel
+                                            Grid.Column="2"
+                                            Orientation="Horizontal"
+                                            Spacing="4">
+                                            <Button
+                                                x:Name="RemoveMentionButton"
+                                                AutomationProperties.Name="Remove selected mention"
+                                                Content="Remove @"
+                                                Visibility="Collapsed" />
+                                            <Button
+                                                x:Name="RemoveAttachmentButton"
+                                                AutomationProperties.Name="Remove selected attachment"
+                                                Content="Remove file"
+                                                Visibility="Collapsed" />
+                                        </StackPanel>
+                                    </Grid>
+                                    <TextBox
+                                        x:Name="ComposerTextBox"
+                                        Grid.Row="1"
+                                        MinHeight="64"
+                                        MaxHeight="160"
+                                        Margin="0,8"
+                                        AcceptsReturn="True"
+                                        AutomationProperties.Name="Message composer"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        PlaceholderText="Write a message"
+                                        TextWrapping="Wrap" />
+                                    <Grid Grid.Row="2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Button
+                                            x:Name="ComposerAddButton"
+                                            Width="36"
+                                            Height="36"
+                                            Padding="0"
+                                            AutomationProperties.Name="Add message content"
+                                            CornerRadius="18"
+                                            ToolTipService.ToolTip="Attach or mention">
+                                            <FontIcon Glyph="&#xE710;" />
+                                            <Button.Flyout>
+                                                <MenuFlyout>
+                                                    <MenuFlyoutItem
+                                                        x:Name="AttachButton"
+                                                        Text="Attach file">
+                                                        <MenuFlyoutItem.Icon>
+                                                            <FontIcon Glyph="&#xE8B7;" />
+                                                        </MenuFlyoutItem.Icon>
+                                                    </MenuFlyoutItem>
+                                                    <MenuFlyoutItem
+                                                        x:Name="MentionButton"
+                                                        Text="Mention">
+                                                        <MenuFlyoutItem.Icon>
+                                                            <FontIcon Glyph="&#xE8A4;" />
+                                                        </MenuFlyoutItem.Icon>
+                                                    </MenuFlyoutItem>
+                                                </MenuFlyout>
+                                            </Button.Flyout>
+                                        </Button>
+                                        <TextBlock
+                                            x:Name="SendingAsText"
+                                            Grid.Column="1"
+                                            Margin="10,0"
+                                            VerticalAlignment="Center"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Style="{StaticResource CaptionTextBlockStyle}"
+                                            TextTrimming="CharacterEllipsis" />
+                                        <TextBlock
+                                            x:Name="SendStatusText"
+                                            Grid.Column="2"
+                                            Margin="6,0"
+                                            VerticalAlignment="Center"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Style="{StaticResource CaptionTextBlockStyle}" />
+                                        <Button
+                                            x:Name="SendButton"
+                                            Grid.Column="3"
+                                            Width="36"
+                                            Height="36"
+                                            Padding="0"
+                                            AutomationProperties.Name="Send message"
+                                            CornerRadius="18"
+                                            Style="{StaticResource AccentButtonStyle}"
+                                            ToolTipService.ToolTip="Send message (Enter)">
+                                            <FontIcon x:Name="SendButtonIcon" Glyph="&#xE74A;" />
+                                        </Button>
+                                    </Grid>
+                                    </Grid>
+                                </Border>
+                            </Grid>
+                        </Grid>
+
+                        <Grid x:Name="PeoplePage" Grid.Row="1" Padding="28,18,28,20" RowSpacing="12" Visibility="Collapsed">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" /><RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <Grid ColumnSpacing="10">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <TextBox x:Name="ConversationSearchBox" PlaceholderText="Search name, group or ID" AutomationProperties.Name="Search people and groups" />
+                                <Button x:Name="NewButton" Grid.Column="1" Content="New" Style="{StaticResource AccentButtonStyle}">
+                                    <Button.Flyout>
+                                        <MenuFlyout>
+                                            <MenuFlyoutItem
+                                                x:Name="NewPersonaMenuItem"
+                                                Text="New persona">
+                                                <MenuFlyoutItem.Icon>
+                                                    <FontIcon Glyph="&#xE77B;" />
+                                                </MenuFlyoutItem.Icon>
+                                            </MenuFlyoutItem>
+                                            <MenuFlyoutItem
+                                                x:Name="AddFriendButton"
+                                                Text="Add friend">
+                                                <MenuFlyoutItem.Icon>
+                                                    <FontIcon Glyph="&#xE8FA;" />
+                                                </MenuFlyoutItem.Icon>
+                                            </MenuFlyoutItem>
+                                            <MenuFlyoutItem
+                                                x:Name="NewGroupButton"
+                                                Text="New group">
+                                                <MenuFlyoutItem.Icon>
+                                                    <FontIcon Glyph="&#xE716;" />
+                                                </MenuFlyoutItem.Icon>
+                                            </MenuFlyoutItem>
+                                        </MenuFlyout>
+                                    </Button.Flyout>
+                                </Button>
+                            </Grid>
+                            <Grid Grid.Row="1" ColumnSpacing="12">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                <ComboBox x:Name="ConversationTypeBox" Width="140" SelectedIndex="0" AutomationProperties.Name="Filter people and groups">
+                                    <x:String>All</x:String><x:String>People</x:String><x:String>Groups</x:String>
+                                </ComboBox>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                                    <TextBlock x:Name="PeopleCountText" TextTrimming="CharacterEllipsis" Style="{StaticResource CaptionTextBlockStyle}" />
+                                    <TextBlock x:Name="PendingRequestsSummary" Text="No pending requests" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </StackPanel>
+                            </Grid>
+                            <Expander x:Name="PendingRequestsExpander" Grid.Row="2" Header="Pending requests" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" IsExpanded="False" Visibility="Collapsed">
+                                <ListView x:Name="PendingRequestList" MaxHeight="220" SelectionMode="None" AutomationProperties.Name="Pending requests">
+                                    <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /></Style></ListView.ItemContainerStyle>
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Spacing="8" Padding="4,8">
+                                                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                                <TextBlock Text="{Binding Detail}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                    <Button Content="Accept" Click="AcceptRequest_Click" Style="{StaticResource AccentButtonStyle}" />
+                                                    <Button Content="Decline" Click="DeclineRequest_Click" />
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+                            </Expander>
+                            <Border Grid.Row="3" Style="{StaticResource MatchaCardStyle}" Padding="6">
+                                <Grid>
+                                    <ListView x:Name="ConversationList" AutomationProperties.Name="People and groups" IsItemClickEnabled="True" SelectionMode="Single">
+                                        <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch" /></Style></ListView.ItemContainerStyle>
+                                        <ListView.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Padding="8,10" ColumnSpacing="12">
+                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="40" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                                    <Border Width="40" Height="40" CornerRadius="20" Background="{ThemeResource ControlFillColorDefaultBrush}"><FontIcon Glyph="{Binding Glyph}" FontSize="18" /></Border>
+                                                    <StackPanel Grid.Column="1" Spacing="3">
+                                                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock Text="{Binding Preview}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock Text="{Binding IdentityText}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" Style="{StaticResource CaptionTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                                                    </StackPanel>
+                                                    <TextBlock Grid.Column="2" Text="{Binding TimeText}" VerticalAlignment="Top" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Style="{StaticResource CaptionTextBlockStyle}" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListView.ItemTemplate>
+                                        <ListView.ContextFlyout>
+                                            <MenuFlyout>
+                                                <MenuFlyoutItem x:Name="NewPersonaEmptyMenuItem" Text="New persona" />
+                                                <MenuFlyoutItem x:Name="AddFriendEmptyMenuItem" Text="Add friend" />
+                                                <MenuFlyoutItem x:Name="NewGroupEmptyMenuItem" Text="New group" />
+                                            </MenuFlyout>
+                                        </ListView.ContextFlyout>
+                                    </ListView>
+                                    <StackPanel x:Name="PeopleEmptyState" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10" Margin="20" Visibility="Collapsed">
+                                        <FontIcon Glyph="&#xE716;" FontSize="30" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <TextBlock x:Name="PeopleEmptyTitle" Text="No conversations yet" HorizontalAlignment="Center" FontWeight="SemiBold" />
+                                        <TextBlock x:Name="PeopleEmptyDescription" Text="Use New to add a friend or create a group." TextWrapping="Wrap" TextAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </Grid>
+
+                        <Grid
+                            x:Name="AccountPage"
+                            Grid.Row="1"
+                            Padding="28,8,28,20"
+                            Visibility="Collapsed">
+                            <ScrollViewer>
+                                <StackPanel x:Name="AccountControlsPanel" MaxWidth="620" Spacing="16">
+                                    <Border
+                                        x:Name="AccountIdentityCard"
+                                        Padding="16"
+                                        Style="{StaticResource MatchaCardStyle}">
+                                        <StackPanel Orientation="Horizontal" Spacing="16">
+                                            <PersonPicture
+                                                x:Name="AccountPicture"
+                                                Width="80"
+                                                Height="80"
+                                                DisplayName="?" />
+                                            <StackPanel VerticalAlignment="Center" Spacing="4">
+                                                <TextBlock
+                                                    x:Name="AccountNameText"
+                                                    Style="{StaticResource SubtitleTextBlockStyle}" />
+                                                <TextBlock
+                                                    x:Name="AccountIdText"
+                                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                    TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+                                    <TextBlock
+                                        Margin="0,4,0,0"
+                                        Style="{StaticResource SubtitleTextBlockStyle}"
+                                        Text="Identity routing" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="The sending identity authors simulated messages. The bot account owns the protocol session and self ID."
+                                        TextWrapping="Wrap" />
+                                    <ComboBox
+                                        x:Name="AccountSendingIdentityBox"
+                                        HorizontalAlignment="Stretch"
+                                        DisplayMemberPath="Description"
+                                        Header="Sending identity" />
+                                    <ComboBox
+                                        x:Name="AccountBotBox"
+                                        HorizontalAlignment="Stretch"
+                                        DisplayMemberPath="Description"
+                                        Header="Protocol bot account" />
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <Button
+                                            x:Name="ApplyAccountButton"
+                                            Content="Apply"
+                                            Style="{StaticResource AccentButtonStyle}" />
+                                        <Button
+                                            x:Name="AccountNewPersonaButton"
+                                            Content="New persona" />
+                                        <Button
+                                            x:Name="ConnectionSettingsButton"
+                                            Content="Connection settings" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Grid>
+
+                        <local:ActivityLogPage
+                            x:Name="ActivityLogsPage"
+                            Grid.Row="1"
+                            Visibility="Collapsed" />
+
+                        <local:SettingsPage
+                            x:Name="SettingsPageHost"
+                            Grid.Row="1"
+                            Visibility="Collapsed" />
+
+                    </Grid>
+
+                    <Border x:Name="ProtocolPanel" Grid.Column="1"
+                            Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                            BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="1,0,0,0" Visibility="Collapsed">
+                        <local:ProtocolInspector x:Name="ProtocolInspectorHost" />
+                    </Border>
+
+                    <Border
+                        x:Name="ConsolePanel"
+                        Grid.Row="1"
+                        Grid.ColumnSpan="2"
+                        Background="{ThemeResource LayerFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                        BorderThickness="0,1,0,0"
+                        Visibility="Collapsed">
+                        <Grid Padding="12,10">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid>
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE756;" />
+                                        <TextBlock
+                                            VerticalAlignment="Center"
+                                            FontWeight="SemiBold"
+                                            Text="Console" />
+                                        <TextBlock
+                                            x:Name="InlineConsoleStatusText"
+                                            VerticalAlignment="Center"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Style="{StaticResource CaptionTextBlockStyle}" />
+                                    </StackPanel>
+                                    <StackPanel
+                                        HorizontalAlignment="Right"
+                                        Orientation="Horizontal"
+                                        Spacing="6">
+                                        <Button
+                                            x:Name="InlineConsoleClearButton"
+                                            Content="Clear" />
+                                        <Button
+                                            x:Name="OpenFullConsoleButton"
+                                            Content="Open full" />
+                                        <Button
+                                            x:Name="CloseConsoleButton"
+                                            AutomationProperties.Name="Close inline console"
+                                            ToolTipService.ToolTip="Close console">
+                                            <SymbolIcon Symbol="Cancel" />
+                                        </Button>
+                                    </StackPanel>
+                                </Grid>
+                                <Grid Grid.Row="1" Margin="0,8,0,0" ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="150" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox
+                                        x:Name="InlineConsoleSearchBox"
+                                        AutomationProperties.Name="Search inline console"
+                                        PlaceholderText="Search activity" />
+                                    <ComboBox
+                                        x:Name="InlineConsoleCategoryBox"
+                                        Grid.Column="1"
+                                        AutomationProperties.Name="Filter inline console"
+                                        SelectedIndex="0">
+                                        <x:String>All activity</x:String>
+                                        <x:String>Application</x:String>
+                                        <x:String>Protocol</x:String>
+                                    </ComboBox>
+                                </Grid>
+                            </Grid>
+                            <Grid
+                                x:Name="InlineConsoleBody"
+                                Grid.Row="1"
+                                Margin="0,8,0,0">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition x:Name="InlineConsoleListRow" Height="*" />
+                                    <RowDefinition x:Name="InlineConsoleDetailRow" Height="0" />
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition x:Name="InlineConsoleListColumn" Width="2*" />
+                                    <ColumnDefinition x:Name="InlineConsoleSpacerColumn" Width="10" />
+                                    <ColumnDefinition x:Name="InlineConsoleDetailColumn" Width="3*" />
+                                </Grid.ColumnDefinitions>
+                                <ListView
+                                    x:Name="InlineConsoleList"
+                                    AutomationProperties.Name="Inline activity entries"
+                                    SelectionMode="Single">
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Padding="4,6" ColumnSpacing="8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <FontIcon
+                                                    VerticalAlignment="Center"
+                                                    FontSize="13"
+                                                    Glyph="{Binding Glyph}" />
+                                                <StackPanel Grid.Column="1">
+                                                    <TextBlock
+                                                        FontWeight="SemiBold"
+                                                        Text="{Binding Summary}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock
+                                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                        Style="{StaticResource CaptionTextBlockStyle}"
+                                                        Text="{Binding Header}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                </StackPanel>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+                                <Border
+                                    x:Name="InlineConsoleDetailPanel"
+                                    Grid.Column="2"
+                                    Padding="10"
+                                    Style="{StaticResource MatchaCardStyle}">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="*" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock
+                                            x:Name="InlineConsoleDetailHeader"
+                                            FontWeight="SemiBold"
+                                            Text="Select an activity entry"
+                                            TextTrimming="CharacterEllipsis" />
+                                        <TextBox
+                                            x:Name="InlineConsoleDetailBox"
+                                            Grid.Row="1"
+                                            Margin="0,6,0,0"
+                                            AcceptsReturn="True"
+                                            AutomationProperties.Name="Inline activity detail"
+                                            FontFamily="Consolas"
+                                            IsReadOnly="True"
+                                            ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                                            ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                            TextWrapping="NoWrap" />
+                                    </Grid>
+                                </Border>
+                            </Grid>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </NavigationView.Content>
+        </NavigationView>
+
+        <InfoBar
+            x:Name="ErrorInfoBar"
+            Grid.Row="1"
+            Margin="24"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Top"
+            IsClosable="True"
+            IsOpen="False"
+            Severity="Error"
+            Title="Matcha couldn't complete that action" />
+    </Grid>
+</Window>
