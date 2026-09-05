@@ -1,0 +1,17 @@
+<Project>
+  <PropertyGroup>
+    <MatchaVersion>0.1.0.1</MatchaVersion>
+    <Version>$(MatchaVersion)</Version>
+    <AssemblyVersion>$(MatchaVersion)</AssemblyVersion>
+    <FileVersion>$(MatchaVersion)</FileVersion>
+    <InformationalVersion>$(MatchaVersion)</InformationalVersion>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**\artifacts\**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>
