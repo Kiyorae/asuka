@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Matcha (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "Matcha (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
