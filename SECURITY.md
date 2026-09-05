@@ -2,32 +2,32 @@
 
 ## Network boundary
 
-Asuka 模拟的是整个平台控制面。默认只监听 `127.0.0.1`，首次启动会生成 256-bit 随机 Access Token；包括 loopback 在内的服务端模式默认都要求认证。所有带 `Origin` 的 HTTP/WebSocket 请求都会被拒绝，因为协议端点只面向原生 Bot 客户端，不是浏览器 API。
+Asuka simulates the platform's entire control plane. It listens only on `127.0.0.1` by default and generates a random 256-bit access token on first launch. Server modes require authentication by default even on loopback. Every HTTP or WebSocket request containing an `Origin` header is rejected because protocol endpoints are intended for native bot clients, not browser APIs.
 
-当前内置监听和反向 WebSocket 使用明文 `http/ws`，因此非 loopback 地址默认 fail-closed；非 loopback HTTP WebHook 同样被拒绝，必须改用 HTTPS。`AllowInsecureRemoteAccess` 只为隔离测试网络提供显式危险覆盖，不会由普通界面自动启用。需要跨主机或容器连接时，应使用可信 TLS 终结、VPN/隧道，并确认 Windows Defender Firewall 仅开放必要网络。
+Built-in listeners and reverse WebSocket connections currently use clear-text `http/ws`, so non-loopback addresses fail closed by default. Non-loopback HTTP WebHooks are also rejected and must use HTTPS. `AllowInsecureRemoteAccess` is an explicitly dangerous override for isolated test networks only and is never enabled automatically by the normal interface. Cross-host or container connections should use trusted TLS termination or a VPN/tunnel, with Windows Defender Firewall configured to expose only the required network.
 
-OneBot 和 Milky 的鉴权使用精确 Token 比较。Milky API 的查询参数不会被当作凭据；只有 `/event` WebSocket 为兼容受限客户端接受 `access_token` 查询参数。
+OneBot and Milky authentication uses exact token comparison. Milky API query parameters are never accepted as credentials; only the `/event` WebSocket accepts an `access_token` query parameter for compatibility with constrained clients.
 
 ## Local files and media
 
-正式构建是 MSIX `Windows.FullTrustApplication`。用户通过原生 Picker 选择的本地文件会复制到 Windows 管理的包 `LocalCache\assets`，以 SHA-256 内容寻址；unpackaged 调试配置仍回退到 `%LOCALAPPDATA%\Asuka\Cache\assets`。协议传入的绝对路径、`file:` URI、UNC 与设备路径不会被读取；本地文件权限只授予用户主动选择的可信应用流程。
+Production builds use an MSIX `Windows.FullTrustApplication`. Local files selected through native pickers are copied into the Windows-managed package `LocalCache\assets` and addressed by SHA-256. Unpackaged debugging falls back to `%LOCALAPPDATA%\Asuka\Cache\assets`. Absolute paths, `file:` URIs, UNC paths, and device paths supplied through protocols are never read. Local file access is granted only through trusted application flows initiated by an explicit user selection.
 
-远程媒体下载：
+Remote media downloads:
 
-- 最大 64 MiB；
-- 流式读取并在写入时计算哈希；
-- 禁止自动重定向；
-- 禁用系统代理、Cookie 与连接复用；
-- 不携带协议 Access Token；
-- 只接受明确的 `http`/`https` 引用；
-- DNS 解析后只连接固定的公网 IP，拒绝 loopback、私网、CGNAT、链路本地、组播和保留地址。
+- Accept at most 64 MiB.
+- Stream content and calculate its hash while writing.
+- Reject automatic redirects.
+- Disable system proxies, cookies, and connection reuse.
+- Never include the protocol access token.
+- Accept only explicit `http` or `https` references.
+- Connect only to a pinned public IP after DNS resolution, rejecting loopback, private, CGNAT, link-local, multicast, and reserved addresses.
 
-`/assets/<id>` 需要与协议服务相同的 Bearer Token，并同样拒绝浏览器 `Origin`。
+`/assets/<id>` requires the same Bearer token as the protocol service and also rejects browser `Origin` headers.
 
 ## Secrets and diagnostics
 
-Access Token 存入 Windows Password Vault，普通设置不保存明文 Token。Raw Events 检查器可以显示完整协议 payload，可能包含消息内容；普通应用日志必须避免记录 Token、消息正文或原始 payload。导出或复制调试数据前请人工检查。
+The access token is stored in Windows Password Vault and is never saved in plain text with ordinary settings. The Raw Events inspector can display complete protocol payloads, which may contain message content. Ordinary application logs must not record tokens, message bodies, or raw payloads. Review diagnostic data manually before exporting or copying it.
 
 ## Reporting
 
-安全问题请通过项目维护者提供的私有安全报告渠道提交，不要在公开 issue 中附上有效凭据、私人消息或可直接利用的完整攻击步骤。
+Report security issues through a private security-reporting channel provided by the project maintainers. Do not include valid credentials, private messages, or complete directly exploitable attack instructions in a public issue.
