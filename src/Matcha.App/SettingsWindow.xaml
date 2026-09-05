@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Matcha.App.SettingsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Matcha.App">
+
+    <Window.SystemBackdrop>
+        <MicaBackdrop Kind="BaseAlt" />
+    </Window.SystemBackdrop>
+
+    <Grid x:Name="RootGrid" Padding="24" Background="Transparent">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Margin="0,0,0,16">
+            <TextBlock FontSize="28" FontWeight="SemiBold" Text="Settings" />
+            <TextBlock Opacity="0.65" Text="Changes are applied only when you choose Save." />
+        </StackPanel>
+
+        <TabView Grid.Row="1" IsAddTabButtonVisible="False">
+            <TabViewItem Header="Connection">
+                <ScrollViewer Padding="2,12,12,12">
+                    <StackPanel MaxWidth="640" HorizontalAlignment="Stretch" Spacing="14">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox
+                                x:Name="ProtocolBox"
+                                Header="Protocol"
+                                HorizontalAlignment="Stretch" />
+                            <ComboBox
+                                x:Name="TransportBox"
+                                Grid.Column="1"
+                                Header="Transport"
+                                HorizontalAlignment="Stretch" />
+                        </Grid>
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox
+                                x:Name="HostBox"
+                                Header="Host"
+                                PlaceholderText="127.0.0.1" />
+                            <NumberBox
+                                x:Name="PortBox"
+                                Grid.Column="1"
+                                Header="Port"
+                                Minimum="1"
+                                Maximum="65535"
+                                SpinButtonPlacementMode="Compact" />
+                        </Grid>
+                        <TextBox
+                            x:Name="PathBox"
+                            Header="WebSocket path"
+                            PlaceholderText="Use the protocol default" />
+                        <TextBox
+                            x:Name="AdvertisedHostBox"
+                            Header="Advertised host"
+                            PlaceholderText="Optional host used in generated media URLs" />
+                        <TextBlock
+                            x:Name="EndpointPreview"
+                            Opacity="0.68"
+                            Style="{StaticResource CaptionTextBlockStyle}"
+                            TextWrapping="Wrap" />
+                        <PasswordBox
+                            x:Name="TokenBox"
+                            Header="Access token"
+                            PasswordRevealMode="Peek"
+                            PlaceholderText="Stored in Windows Credential Locker" />
+                        <TextBox
+                            x:Name="WebhookBox"
+                            MinHeight="76"
+                            AcceptsReturn="True"
+                            Header="Milky WebHook URLs"
+                            PlaceholderText="One HTTP or HTTPS URL per line"
+                            TextWrapping="NoWrap" />
+                        <Grid ColumnSpacing="18">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="180" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <ToggleSwitch x:Name="ReconnectSwitch" Header="Auto reconnect" />
+                            <NumberBox
+                                x:Name="ReconnectBox"
+                                Grid.Column="1"
+                                Header="Delay (seconds)"
+                                Minimum="1"
+                                Maximum="60"
+                                SpinButtonPlacementMode="Compact" />
+                            <ToggleSwitch
+                                x:Name="SelfEventsSwitch"
+                                Grid.Column="2"
+                                Header="Post bot-generated events" />
+                        </Grid>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabViewItem>
+
+            <TabViewItem Header="Identity">
+                <ScrollViewer Padding="2,12,12,12">
+                    <StackPanel MaxWidth="640" HorizontalAlignment="Stretch" Spacing="14">
+                        <TextBlock FontSize="18" FontWeight="SemiBold" Text="Sending identity" />
+                        <TextBlock
+                            Opacity="0.7"
+                            Text="The sending identity authors simulated messages. The bot account owns the protocol session and conversation self ID."
+                            TextWrapping="Wrap" />
+                        <ComboBox
+                            x:Name="ActivePersonaBox"
+                            Header="Sending identity"
+                            DisplayMemberPath="Description"
+                            HorizontalAlignment="Stretch" />
+                        <ComboBox
+                            x:Name="BotPersonaBox"
+                            Header="Bot account / protocol self ID"
+                            DisplayMemberPath="Description"
+                            HorizontalAlignment="Stretch" />
+                        <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+                        <ComboBox x:Name="ThemeBox" Header="App theme" HorizontalAlignment="Stretch" />
+                    </StackPanel>
+                </ScrollViewer>
+            </TabViewItem>
+
+            <TabViewItem Header="About">
+                <StackPanel Padding="18" Spacing="12">
+                    <Image
+                        Width="72"
+                        Height="72"
+                        HorizontalAlignment="Left"
+                        Source="ms-appx:///Assets/Akame.png"
+                        Stretch="Uniform"
+                        AutomationProperties.Name="Matcha app icon" />
+                    <TextBlock FontSize="24" FontWeight="SemiBold" Text="Matcha for Windows" />
+                    <TextBlock Text="Native WinUI 3 · .NET 10 · Windows 11" />
+                    <TextBlock
+                        MaxWidth="560"
+                        Opacity="0.72"
+                        Text="A local protocol simulator and conversation workspace. Rendering, networking, storage, dialogs, file access, and credentials use Windows and Microsoft .NET APIs—no browser engine is embedded."
+                        TextWrapping="Wrap" />
+                    <HyperlinkButton x:Name="OpenDataFolderButton" Content="Open data folder" />
+                </StackPanel>
+            </TabViewItem>
+        </TabView>
+
+        <Grid Grid.Row="2" Margin="0,16,0,0">
+            <InfoBar
+                x:Name="ValidationInfoBar"
+                IsClosable="True"
+                IsOpen="False"
+                Severity="Error"
+                Title="Settings couldn't be saved" />
+            <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" Spacing="8">
+                <Button x:Name="CancelButton" Content="Cancel" />
+                <Button x:Name="SaveButton" Content="Save" Style="{StaticResource AccentButtonStyle}" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>
