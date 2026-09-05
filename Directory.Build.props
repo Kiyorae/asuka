@@ -5,6 +5,7 @@
     <AssemblyVersion>$(AsukaVersion)</AssemblyVersion>
     <FileVersion>$(AsukaVersion)</FileVersion>
     <InformationalVersion>$(AsukaVersion)</InformationalVersion>
+    <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

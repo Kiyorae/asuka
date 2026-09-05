@@ -49,3 +49,8 @@ identity with Windows' AllowUnsigned installation path. That identity is not the
 identity that will be used for a future formally signed Asuka release. Treat
 this package as an unsigned development release and install it only when you
 trust the GitHub Release and have verified its external ZIP SHA-256 value.
+
+License
+-------
+Asuka is distributed under GNU AGPL version 3 or any later version
+(SPDX: AGPL-3.0-or-later). See LICENSE for the complete terms.

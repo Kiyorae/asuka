@@ -132,4 +132,4 @@ ARM64 将 `-Platform` 改为 `ARM64`。正式渠道必须先固定 MSIX Identity
 
 ## 许可证
 
-本项目按 GNU Affero General Public License v3.0 发布。Asuka 是面向 Windows 的独立原生重写。
+本项目按 GNU Affero General Public License v3.0 或更高版本发布（SPDX：`AGPL-3.0-or-later`）。完整条款见 [`LICENSE`](LICENSE)。Asuka 是面向 Windows 的独立原生重写。
