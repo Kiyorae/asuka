@@ -3,7 +3,7 @@ using Asuka.Core;
 
 namespace Asuka.Protocols;
 
-internal sealed class OneBotContext(AsukaStore store)
+internal sealed class OneBotContext(AsukaStore store, OneBotVersion version, string selfId)
 {
     internal async Task<JsonObject> SenderInfoAsync(
         string userId,
@@ -25,6 +25,8 @@ internal sealed class OneBotContext(AsukaStore store)
             result["card"] = member.Card;
             result["role"] = member.Role.ToString().ToLowerInvariant();
             result["title"] = member.Title;
+            result["area"] = string.Empty;
+            result["level"] = string.Empty;
         }
 
         return result;
@@ -33,6 +35,18 @@ internal sealed class OneBotContext(AsukaStore store)
     internal async Task<JsonObject?> UserInfoAsync(string userId, CancellationToken cancellationToken)
     {
         var user = await store.GetUserAsync(userId, cancellationToken).ConfigureAwait(false);
+        if (user is not null && version == OneBotVersion.V12)
+        {
+            var friendship = await store.GetFriendshipAsync(selfId, userId, cancellationToken).ConfigureAwait(false);
+            return new JsonObject
+            {
+                ["user_id"] = user.Id,
+                ["user_name"] = user.Name,
+                ["user_displayname"] = user.Nickname,
+                ["user_remark"] = friendship?.Remark ?? string.Empty,
+            };
+        }
+
         return user is null
             ? null
             : new JsonObject
@@ -47,6 +61,11 @@ internal sealed class OneBotContext(AsukaStore store)
     internal async Task<JsonObject?> GroupInfoAsync(string groupId, CancellationToken cancellationToken)
     {
         var group = await store.GetGroupAsync(groupId, cancellationToken).ConfigureAwait(false);
+        if (group is not null && version == OneBotVersion.V12)
+        {
+            return new JsonObject { ["group_id"] = group.Id, ["group_name"] = group.Name };
+        }
+
         return group is null
             ? null
             : new JsonObject
@@ -70,6 +89,16 @@ internal sealed class OneBotContext(AsukaStore store)
         }
 
         var user = await store.GetUserAsync(userId, cancellationToken).ConfigureAwait(false);
+        if (version == OneBotVersion.V12)
+        {
+            return new JsonObject
+            {
+                ["user_id"] = userId,
+                ["user_name"] = user?.Name ?? userId,
+                ["user_displayname"] = string.IsNullOrEmpty(member.Card) ? user?.Nickname ?? string.Empty : member.Card,
+            };
+        }
+
         return new JsonObject
         {
             ["group_id"] = groupId,
@@ -78,6 +107,11 @@ internal sealed class OneBotContext(AsukaStore store)
             ["card"] = member.Card,
             ["sex"] = (user?.Sex ?? Sex.Unknown).ToString().ToLowerInvariant(),
             ["age"] = user?.Age ?? 0,
+            ["area"] = string.Empty,
+            ["level"] = string.Empty,
+            ["unfriendly"] = false,
+            ["title_expire_time"] = 0,
+            ["card_changeable"] = true,
             ["join_time"] = member.JoinedAt.ToUnixTimeSeconds(),
             ["last_sent_time"] = member.LastSentAt?.ToUnixTimeSeconds() ?? 0,
             ["role"] = member.Role.ToString().ToLowerInvariant(),

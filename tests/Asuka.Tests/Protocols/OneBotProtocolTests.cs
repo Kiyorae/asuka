@@ -11,15 +11,9 @@ public sealed class OneBotProtocolTests
 {
     private static readonly string[] ExpectedActions =
     [
-        "send_msg", "send_private_msg", "send_group_msg", "send_message",
-        "delete_msg", "delete_message", "get_msg", "get_message",
-        "get_login_info", "get_self_info", "get_stranger_info", "get_user_info", "get_friend_list",
+        "send_message", "delete_message", "get_self_info", "get_user_info", "get_friend_list",
         "get_group_info", "get_group_list", "get_group_member_info", "get_group_member_list",
-        "set_group_name", "set_group_card", "set_group_special_title", "set_group_admin",
-        "set_group_ban", "set_group_whole_ban", "set_group_kick", "set_group_leave", "leave_group",
-        "set_friend_add_request", "set_group_add_request",
-        "get_status", "get_version_info", "get_version", "get_supported_actions",
-        "can_send_image", "can_send_record",
+        "set_group_name", "leave_group", "get_status", "get_version", "get_supported_actions",
     ];
 
     [TestMethod]
@@ -75,18 +69,29 @@ public sealed class OneBotProtocolTests
     }
 
     [TestMethod]
-    public async Task V11AsyncSuffixReturnsTheCompleteActionManifestButV12RejectsIt()
+    public async Task V12ActionManifestContainsOnlyImplementedV12StandardActions()
     {
         await using var fixture = new ProtocolTestFixture();
         var resolver = new StubProtocolAssetResolver();
-        var v11 = new OneBotProtocol(OneBotVersion.V11, ProtocolTestFixture.SelfId, fixture.Platform, resolver);
-        var v12 = new OneBotProtocol(OneBotVersion.V12, ProtocolTestFixture.SelfId, fixture.Platform, resolver);
+        using var v11 = new OneBotProtocol(OneBotVersion.V11, ProtocolTestFixture.SelfId, fixture.Platform, resolver);
+        using var v12 = new OneBotProtocol(OneBotVersion.V12, ProtocolTestFixture.SelfId, fixture.Platform, resolver);
 
-        var reply = await v11.HandleAsync(new ProtocolCall("get_supported_actions_async", new JsonObject()));
+        var reply = await v12.HandleAsync(new ProtocolCall("get_supported_actions", new JsonObject()));
         Assert.IsTrue(reply.IsSuccess);
         var actions = ((JsonArray)reply.Data!).Select(static node => node!.GetValue<string>()).ToArray();
         Assert.HasCount(ExpectedActions.Length, actions);
         CollectionAssert.AreEquivalent(ExpectedActions, actions);
+
+        var accepted = await v11.HandleAsync(new ProtocolCall("get_login_info_async", new JsonObject()));
+        Assert.AreEqual(1, accepted.RetCode);
+        Assert.AreEqual("async", v11.CreateEnvelope(accepted)["status"]!.GetValue<string>());
+        Assert.IsNull(v11.CreateEnvelope(accepted)["data"]);
+        await v11.WaitForScheduledActionsAsync();
+        Assert.AreEqual(1404, (await v11.HandleAsync(new ProtocolCall("get_supported_actions", new JsonObject()))).RetCode);
+        foreach (var extension in new[] { "send_group_msg", "get_message", "set_group_ban", "set_group_card", "set_friend_add_request" })
+        {
+            Assert.AreEqual(10002, (await v12.HandleAsync(new ProtocolCall(extension, new JsonObject()))).RetCode, extension);
+        }
 
         var unsupported = await v12.HandleAsync(
             new ProtocolCall("get_supported_actions_async", new JsonObject()));
@@ -184,10 +189,11 @@ public sealed class OneBotProtocolTests
         Assert.AreEqual("v11 plain text", v11Stored.Content.PlainText());
 
         var v12Reply = await v12.HandleAsync(new ProtocolCall(
-            "send_group_msg",
+            "send_message",
             new JsonObject
             {
                 ["group_id"] = ProtocolTestFixture.GroupId,
+                ["detail_type"] = "group",
                 ["message"] = new JsonArray
                 {
                     Segment("text", new JsonObject { ["text"] = "v12 segments" }),

@@ -10,4 +10,17 @@
   <ItemGroup>
     <ProjectReference Include="../Asuka.Core/Asuka.Core.csproj" />
   </ItemGroup>
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <!-- Windows 11 ARM64 supports the bundled x64 helper through x64 emulation. -->
+    <SilkDecoderDirectory>$(MSBuildProjectDirectory)\obj\silk-decoder\$(Configuration)\x64</SilkDecoderDirectory>
+  </PropertyGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <SilkDecoderSource Include="..\..\native\Asuka.SilkDecoder\**\*.c;..\..\native\Asuka.SilkDecoder\**\*.h;..\..\scripts\build-silk-decoder.ps1" />
+    <Content Include="$(SilkDecoderDirectory)\asuka-silk-decoder.exe" Link="media\asuka-silk-decoder.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\native\Asuka.SilkDecoder\LICENSE.txt" Link="media\SILK-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="BuildSilkDecoder" BeforeTargets="PrepareForBuild" Condition="$([MSBuild]::IsOSPlatform('Windows')) And '$(DesignTimeBuild)' != 'true'"
+          Inputs="@(SilkDecoderSource)" Outputs="$(SilkDecoderDirectory)\asuka-silk-decoder.exe">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\scripts\build-silk-decoder.ps1&quot; -OutputDirectory &quot;$(SilkDecoderDirectory)&quot;" />
+  </Target>
 </Project>

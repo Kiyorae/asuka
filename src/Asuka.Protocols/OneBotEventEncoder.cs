@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using System.Text.Json;
 using Asuka.Core;
+using JsonValue = System.Text.Json.Nodes.JsonValue;
 
 namespace Asuka.Protocols;
 
@@ -17,22 +18,37 @@ internal sealed class OneBotEventEncoder(
         var time = domainEvent.Time.ToUnixTimeSeconds();
         JsonObject? payload = domainEvent.Payload switch
         {
-            MessageEvent message => await EncodeMessageAsync(message.Message, time, cancellationToken).ConfigureAwait(false),
-            MessageRecalledEvent recalled => EncodeRecall(recalled.Detail, time),
+            MessageEvent message when version == OneBotVersion.V11 || message.Message.Anonymous is null =>
+                await EncodeMessageAsync(message.Message, time, cancellationToken).ConfigureAwait(false),
+            MessageRecalledEvent recalled when version == OneBotVersion.V11 || recalled.Detail.Anonymous is null =>
+                EncodeRecall(recalled.Detail, time),
             GroupMemberAddedEvent added => EncodeMemberChange(added.Change, time, joined: true),
             GroupMemberRemovedEvent removed => EncodeMemberChange(removed.Change, time, joined: false),
+            GroupDisbandedEvent disbanded => EncodeDisband(disbanded, time),
             GroupAdminChangedEvent admin => EncodeAdminChange(admin.Change, time),
             GroupMutedEvent muted => EncodeMute(muted.Mute, time),
             GroupNameChangedEvent => null,
+            FriendAddedEvent added when version == OneBotVersion.V11 =>
+                Merge(Base(time, "notice", "friend_add"), ("user_id", Id(added.UserId))),
             FriendAddedEvent added when version == OneBotVersion.V12 =>
                 Merge(Base(time, "notice", "friend_increase"), ("user_id", added.UserId)),
             FriendRemovedEvent removed when version == OneBotVersion.V12 =>
                 Merge(Base(time, "notice", "friend_decrease"), ("user_id", removed.UserId)),
             RequestReceivedEvent request => EncodeRequest(request.Request, time),
-            PokeEvent poke when version == OneBotVersion.V11 => EncodePoke(poke.Poke, time),
+            PokeEvent poke when version == OneBotVersion.V11 && poke.Poke.Scene == ChatScene.Group => EncodePoke(poke.Poke, time),
             GroupFileUploadedEvent upload when version == OneBotVersion.V11 => EncodeGroupFile(upload.Upload, time),
+            GroupHonorChangedEvent honor when version == OneBotVersion.V11 => EncodeGroupHonor(honor.Change, time),
+            GroupLuckyKingEvent lucky when version == OneBotVersion.V11 => Merge(
+                Base(time, "notice", "notify"), ("sub_type", "lucky_king"),
+                ("group_id", Id(lucky.Result.GroupId)), ("user_id", Id(lucky.Result.SenderId)), ("target_id", Id(lucky.Result.TargetId))),
             _ => null,
         };
+
+        if (payload is not null && version == OneBotVersion.V12)
+        {
+            payload["id"] = domainEvent.Id;
+            payload["time"] = domainEvent.Time.ToUnixTimeMilliseconds() / 1000d;
+        }
 
         return payload is null ? [] : [new OutboundFrame(payload)];
     }
@@ -54,16 +70,16 @@ internal sealed class OneBotEventEncoder(
                 ["message_type"] = message.Scene == ChatScene.Group ? "group" : "private",
                 ["sub_type"] = message.Scene switch
                 {
-                    ChatScene.Group => "normal",
+                    ChatScene.Group => message.Anonymous is null ? "normal" : "anonymous",
                     ChatScene.Friend => "friend",
                     _ => "other",
                 },
                 ["message_id"] = Id(message.Id),
-                ["user_id"] = Id(message.SenderId),
+                ["user_id"] = message.Anonymous is { } anonymousSender ? JsonValue.Create(anonymousSender.Id) : Id(message.SenderId),
                 ["message"] = encodedSegments,
-                ["raw_message"] = preview,
+                ["raw_message"] = OneBotSegmentCodec.ToCqString(encodedSegments),
                 ["font"] = 0,
-                ["sender"] = await context.SenderInfoAsync(
+                ["sender"] = message.Anonymous is { } anonymous ? OneBotAnonymousEncoder.Sender(anonymous) : await context.SenderInfoAsync(
                     message.SenderId,
                     message.Scene == ChatScene.Group ? message.PeerId : null,
                     cancellationToken).ConfigureAwait(false),
@@ -71,7 +87,7 @@ internal sealed class OneBotEventEncoder(
             if (message.Scene == ChatScene.Group)
             {
                 payload["group_id"] = Id(message.PeerId);
-                payload["anonymous"] = null;
+                payload["anonymous"] = message.Anonymous is { } identity ? OneBotAnonymousEncoder.Identity(identity) : null;
             }
 
             return payload;
@@ -106,8 +122,9 @@ internal sealed class OneBotEventEncoder(
                 ? Merge(
                     Base(time, "notice", "group_recall"),
                     ("group_id", Id(recall.PeerId)),
-                    ("user_id", Id(recall.SenderId)),
-                    ("operator_id", Id(recall.OperatorId)),
+                    ("user_id", recall.Anonymous is { } anonymous ? JsonValue.Create(anonymous.Id) : Id(recall.SenderId)),
+                    ("operator_id", recall.Anonymous is { } selfRecall && recall.OperatorId == recall.SenderId
+                        ? JsonValue.Create(selfRecall.Id) : Id(recall.OperatorId)),
                     ("message_id", Id(recall.MessageId)))
                 : Merge(
                     Base(time, "notice", "friend_recall"),
@@ -128,7 +145,21 @@ internal sealed class OneBotEventEncoder(
             result["group_id"] = recall.PeerId;
             result["sub_type"] = recall.OperatorId == recall.SenderId ? "recall" : "delete";
         }
+        else
+        {
+            result.Remove("operator_id");
+        }
 
+        return result;
+    }
+
+    private JsonObject EncodeDisband(GroupDisbandedEvent disbanded, long time)
+    {
+        var selfDisbanded = disbanded.OperatorId == selfId;
+        var result = EncodeMemberChange(new GroupMemberChange(disbanded.GroupId, selfId, disbanded.OperatorId,
+            selfDisbanded ? GroupMemberChangeReason.Voluntary : GroupMemberChangeReason.Administrative), time, joined: false);
+        // V12 reserves an empty subtype for a departure other than a regular leave or kick.
+        if (version == OneBotVersion.V12 && !selfDisbanded) result["sub_type"] = string.Empty;
         return result;
     }
 
@@ -150,7 +181,7 @@ internal sealed class OneBotEventEncoder(
         }
 
         var v12SubType = joined
-            ? change.Reason == GroupMemberChangeReason.Voluntary ? "join" : "invite"
+            ? change.Reason == GroupMemberChangeReason.Invited || change.InviterId is not null ? "invite" : "join"
             : change.Reason == GroupMemberChangeReason.Voluntary ? "leave" : "kick";
         return Merge(
             Base(time, "notice", joined ? "group_member_increase" : "group_member_decrease"),
@@ -173,7 +204,7 @@ internal sealed class OneBotEventEncoder(
 
     private JsonObject? EncodeMute(GroupMute mute, long time)
     {
-        return version == OneBotVersion.V11
+        return version == OneBotVersion.V11 && mute.UserId is not null
             ? Merge(
                 Base(time, "notice", "group_ban"),
                 ("sub_type", mute.Muted ? "ban" : "lift_ban"),
@@ -199,6 +230,19 @@ internal sealed class OneBotEventEncoder(
         return result;
     }
 
+    private JsonObject? EncodeGroupHonor(GroupHonorChange change, long time)
+    {
+        var type = change.Type switch
+        {
+            GroupHonorType.Talkative => "talkative",
+            GroupHonorType.Performer => "performer",
+            GroupHonorType.Emotion => "emotion",
+            _ => null,
+        };
+        return type is null ? null : Merge(Base(time, "notice", "notify"), ("sub_type", "honor"),
+            ("group_id", Id(change.GroupId)), ("honor_type", type), ("user_id", Id(change.UserId)));
+    }
+
     private JsonObject EncodeGroupFile(GroupFileUpload upload, long time)
     {
         return Merge(
@@ -207,8 +251,8 @@ internal sealed class OneBotEventEncoder(
             ("user_id", Id(upload.UserId)),
             ("file", new JsonObject
             {
-                ["id"] = upload.Asset.Id,
-                ["name"] = upload.Asset.Name,
+                ["id"] = upload.FileId ?? upload.Asset.Id,
+                ["name"] = upload.FileName ?? upload.Asset.Name,
                 ["size"] = upload.Asset.ByteCount,
                 ["busid"] = 0,
             }));
@@ -226,19 +270,14 @@ internal sealed class OneBotEventEncoder(
                     ("flag", request.Flag))
                 : Merge(
                     Base(time, "request", "group"),
-                    ("sub_type", request.Kind == RequestKind.GroupJoin ? "add" : "invite"),
+                    ("sub_type", request.Kind is RequestKind.GroupJoin or RequestKind.GroupInvitedJoin ? "add" : "invite"),
                     ("group_id", Id(request.GroupId ?? "0")),
-                    ("user_id", Id(request.RequesterId)),
+                    ("user_id", Id(request.Kind == RequestKind.GroupInvitedJoin ? request.TargetUserId ?? request.RequesterId : request.RequesterId)),
                     ("comment", request.Comment),
                     ("flag", request.Flag));
         }
 
-        return Merge(
-            Base(time, "request", $"asuka.{RequestKindName(request.Kind)}"),
-            ("user_id", request.RequesterId),
-            ("group_id", request.GroupId),
-            ("comment", request.Comment),
-            ("flag", request.Flag));
+        return null;
     }
 
     private JsonObject Base(long time, string type, string detailType)
@@ -274,14 +313,6 @@ internal sealed class OneBotEventEncoder(
     private JsonNode Id(string value) => version == OneBotVersion.V11
         ? JsonExtensions.NumericId(value)
         : System.Text.Json.Nodes.JsonValue.Create(value)!;
-
-    private static string RequestKindName(RequestKind kind) => kind switch
-    {
-        RequestKind.Friend => "friend",
-        RequestKind.GroupJoin => "groupJoin",
-        RequestKind.GroupInvite => "groupInvite",
-        _ => throw new ArgumentOutOfRangeException(nameof(kind)),
-    };
 
     private static JsonObject Merge(JsonObject target, params (string Key, object? Value)[] values)
     {

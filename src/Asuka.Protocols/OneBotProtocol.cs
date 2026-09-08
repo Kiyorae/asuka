@@ -4,28 +4,49 @@ using Asuka.Core;
 
 namespace Asuka.Protocols;
 
-public sealed class OneBotProtocol : IProtocolImplementation
+public sealed partial class OneBotProtocol : IProtocolImplementation
 {
     private const string ImplementationName = "asuka";
     private const string CurrentVersion = "0.1.0.1";
-    private static readonly FrozenSet<string> Actions = new[]
+    private static readonly FrozenSet<string> V11Actions = new[]
     {
-        "send_msg", "send_private_msg", "send_group_msg", "send_message",
-        "delete_msg", "delete_message", "get_msg", "get_message",
-        "get_login_info", "get_self_info", "get_stranger_info", "get_user_info", "get_friend_list",
+        "send_msg", "send_private_msg", "send_group_msg", "delete_msg", "get_msg", "get_forward_msg",
+        "get_login_info", "get_stranger_info", "get_friend_list",
         "get_group_info", "get_group_list", "get_group_member_info", "get_group_member_list",
         "set_group_name", "set_group_card", "set_group_special_title", "set_group_admin",
-        "set_group_ban", "set_group_whole_ban", "set_group_kick", "set_group_leave", "leave_group",
+        "set_group_ban", "set_group_whole_ban", "set_group_kick", "set_group_leave",
+        "set_group_anonymous", "set_group_anonymous_ban",
         "set_friend_add_request", "set_group_add_request",
-        "get_status", "get_version_info", "get_version", "get_supported_actions",
+        "get_status", "get_version_info", "get_group_honor_info",
+        "get_cookies", "get_csrf_token", "get_credentials",
         "can_send_image", "can_send_record",
+        "send_like", "set_restart",
     }.ToFrozenSet(StringComparer.Ordinal);
+
+    private static readonly FrozenSet<string> V12Actions = new[]
+    {
+        "send_message", "delete_message", "get_self_info", "get_user_info", "get_friend_list",
+        "get_group_info", "get_group_list", "get_group_member_info", "get_group_member_list",
+        "set_group_name", "leave_group", "get_status", "get_version", "get_supported_actions",
+    }.ToFrozenSet(StringComparer.Ordinal);
+
+    private static readonly FrozenSet<string> V11MediaActions = V11Actions
+        .Concat(["get_image", "get_record", "clean_cache"]).ToFrozenSet(StringComparer.Ordinal);
+
+    private static readonly FrozenSet<string> V12MediaActions = V12Actions
+        .Concat(["upload_file", "get_file", "upload_file_fragmented", "get_file_fragmented"]).ToFrozenSet(StringComparer.Ordinal);
+
+    private FrozenSet<string> Actions => Version == OneBotVersion.V11 ? (_media is null ? V11Actions : V11MediaActions)
+        : _media is null ? V12Actions : V12MediaActions;
+
+    internal bool IsSupportedAction(string action) => Actions.Contains(action);
 
     private readonly PlatformService _platform;
     private readonly AsukaStore _store;
     private readonly OneBotContext _context;
     private readonly OneBotSegmentCodec _segments;
     private readonly OneBotEventEncoder _events;
+    private readonly MediaService? _media;
 
     public OneBotProtocol(
         OneBotVersion version,
@@ -37,9 +58,10 @@ public sealed class OneBotProtocol : IProtocolImplementation
         SelfId = selfId;
         _platform = platform;
         _store = platform.Store;
-        _context = new OneBotContext(_store);
-        _segments = new OneBotSegmentCodec(version, assetResolver);
+        _context = new OneBotContext(_store, version, selfId);
+        _segments = new OneBotSegmentCodec(version, assetResolver, _store);
         _events = new OneBotEventEncoder(version, selfId, _segments, _context);
+        _media = assetResolver as MediaService;
     }
 
     public OneBotVersion Version { get; }
@@ -53,7 +75,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
     public string SelfId { get; }
 
     public IReadOnlySet<TransportMode> SupportedTransports { get; } =
-        new HashSet<TransportMode> { TransportMode.WebSocketServer, TransportMode.WebSocketClient };
+        new HashSet<TransportMode> { TransportMode.WebSocketServer, TransportMode.WebSocketClient, TransportMode.OneBotHttpServer };
 
     public WebSocketClientHandshake ClientHandshake => Version == OneBotVersion.V11
         ? new WebSocketClientHandshake(
@@ -73,22 +95,74 @@ public sealed class OneBotProtocol : IProtocolImplementation
             },
             ["12.asuka"]);
 
-    public TimeSpan? HeartbeatInterval => TimeSpan.FromSeconds(15);
+    private int _heartbeatIntervalMilliseconds = 15_000;
+    public bool HeartbeatEnabled { get; init; }
+    public int HeartbeatIntervalMilliseconds
+    {
+        get => _heartbeatIntervalMilliseconds;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            _heartbeatIntervalMilliseconds = value;
+        }
+    }
+    public TimeSpan? HeartbeatInterval => HeartbeatEnabled ? TimeSpan.FromMilliseconds(HeartbeatIntervalMilliseconds) : null;
 
     public async Task<ProtocolReply> HandleAsync(
         ProtocolCall request,
         CancellationToken cancellationToken = default)
     {
-        var action = Version == OneBotVersion.V11 && request.Name.EndsWith("_async", StringComparison.Ordinal)
-            ? request.Name[..^6]
-            : request.Name;
+        cancellationToken.ThrowIfCancellationRequested();
+        var action = request.Name;
+        var scheduled = false;
+        var rateLimited = false;
+        if (Version == OneBotVersion.V11)
+        {
+            if (action.EndsWith("_async", StringComparison.Ordinal))
+            {
+                action = action[..^6];
+                scheduled = true;
+            }
+            else if (action.EndsWith("_rate_limited", StringComparison.Ordinal))
+            {
+                action = action[..^13];
+                scheduled = true;
+                rateLimited = true;
+            }
+        }
+
         if (!Actions.Contains(action))
         {
             return Unsupported(action);
         }
 
+        if (OfflineFailure(action) is { } offline) return offline;
+        var normalized = request with { Name = action };
+        return scheduled ? ScheduleAction(normalized, rateLimited, cancellationToken)
+            : await ExecuteCoreAsync(normalized, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<ProtocolReply> ExecuteCoreAsync(ProtocolCall request, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var action = request.Name;
+
+        if (OfflineFailure(action) is { } offline) return offline;
+        if (Version == OneBotVersion.V12)
+        {
+            foreach (var key in RequiredV12StringParameters(action))
+            {
+                if (request.Parameters[key] is not System.Text.Json.Nodes.JsonValue scalar
+                    || !scalar.TryGetValue<string>(out var value) || string.IsNullOrEmpty(value))
+                {
+                    return Invalid($"Missing or invalid string parameter: {key}");
+                }
+            }
+        }
+
         try
         {
+            using var botAction = RequiresOnlineAccount(action) ? _platform.BeginBotAction(SelfId) : null;
             return action switch
             {
                 "send_msg" or "send_message" => await SendMessageAsync(request, null, cancellationToken).ConfigureAwait(false),
@@ -96,6 +170,16 @@ public sealed class OneBotProtocol : IProtocolImplementation
                 "send_group_msg" => await SendMessageAsync(request, ChatScene.Group, cancellationToken).ConfigureAwait(false),
                 "delete_msg" or "delete_message" => await DeleteMessageAsync(request, cancellationToken).ConfigureAwait(false),
                 "get_msg" or "get_message" => await GetMessageAsync(request, cancellationToken).ConfigureAwait(false),
+                "get_forward_msg" => await GetForwardAsync(request, cancellationToken).ConfigureAwait(false),
+                "upload_file" => await UploadFileAsync(request, cancellationToken).ConfigureAwait(false),
+                "get_file" => await GetFileAsync(request, cancellationToken).ConfigureAwait(false),
+                "upload_file_fragmented" => await UploadFileFragmentedAsync(request, cancellationToken).ConfigureAwait(false),
+                "get_file_fragmented" => await GetFileFragmentedAsync(request, cancellationToken).ConfigureAwait(false),
+                "send_like" => await SendLikeAsync(request, cancellationToken).ConfigureAwait(false),
+                "get_image" => await GetImageAsync(request, cancellationToken).ConfigureAwait(false),
+                "get_record" => await GetRecordAsync(request, cancellationToken).ConfigureAwait(false),
+                "clean_cache" => await CleanCacheAsync(request, cancellationToken).ConfigureAwait(false),
+                "set_restart" => await RestartAsync(request, cancellationToken).ConfigureAwait(false),
                 "get_login_info" or "get_self_info" => await LoginInfoAsync(cancellationToken).ConfigureAwait(false),
                 "get_stranger_info" or "get_user_info" => await UserInfoAsync(request, cancellationToken).ConfigureAwait(false),
                 "get_friend_list" => await FriendListAsync(cancellationToken).ConfigureAwait(false),
@@ -103,11 +187,14 @@ public sealed class OneBotProtocol : IProtocolImplementation
                 "get_group_list" => await GroupListAsync(cancellationToken).ConfigureAwait(false),
                 "get_group_member_info" => await MemberInfoAsync(request, cancellationToken).ConfigureAwait(false),
                 "get_group_member_list" => await MemberListAsync(request, cancellationToken).ConfigureAwait(false),
+                "get_group_honor_info" => await GetGroupHonorInfoAsync(request, cancellationToken).ConfigureAwait(false),
+                "get_cookies" or "get_csrf_token" or "get_credentials" => await CredentialApiAsync(request, cancellationToken).ConfigureAwait(false),
                 "set_group_name" => await SetGroupNameAsync(request, cancellationToken).ConfigureAwait(false),
                 "set_group_card" => await SetGroupCardAsync(request, cancellationToken).ConfigureAwait(false),
                 "set_group_special_title" => await SetGroupTitleAsync(request, cancellationToken).ConfigureAwait(false),
                 "set_group_admin" => await SetGroupAdminAsync(request, cancellationToken).ConfigureAwait(false),
                 "set_group_ban" => await SetGroupBanAsync(request, cancellationToken).ConfigureAwait(false),
+                "set_group_anonymous" or "set_group_anonymous_ban" => await GroupAnonymousApiAsync(request, cancellationToken).ConfigureAwait(false),
                 "set_group_whole_ban" => await SetGroupWholeBanAsync(request, cancellationToken).ConfigureAwait(false),
                 "set_group_kick" => await KickMemberAsync(request, cancellationToken).ConfigureAwait(false),
                 "set_group_leave" or "leave_group" => await LeaveGroupAsync(request, cancellationToken).ConfigureAwait(false),
@@ -116,13 +203,17 @@ public sealed class OneBotProtocol : IProtocolImplementation
                 "get_status" => Status(),
                 "get_version_info" or "get_version" => VersionInfo(),
                 "get_supported_actions" => SupportedActions(),
-                "can_send_image" or "can_send_record" => ProtocolReply.Success(new JsonObject { ["yes"] = true }),
+                "can_send_image" or "can_send_record" => ProtocolReply.Success(new JsonObject { ["yes"] = IsAccountOnline }),
                 _ => Unsupported(action),
             };
         }
         catch (PlatformException error)
         {
             return Failure(error);
+        }
+        catch (OneBotSegmentException error)
+        {
+            return new ProtocolReply(Version == OneBotVersion.V11 ? 1400 : error.RetCode, Message: error.Message);
         }
         catch (ArgumentException error)
         {
@@ -136,15 +227,16 @@ public sealed class OneBotProtocol : IProtocolImplementation
 
     public JsonObject CreateEnvelope(ProtocolReply reply, JsonNode? echo = null)
     {
+        var accepted = Version == OneBotVersion.V11 && reply.RetCode == 1;
         var payload = new JsonObject
         {
-            ["status"] = reply.IsSuccess ? "ok" : "failed",
+            ["status"] = accepted ? "async" : reply.IsSuccess ? "ok" : "failed",
             ["retcode"] = reply.RetCode,
-            ["data"] = reply.IsSuccess ? reply.EffectiveData.DeepClone() : null,
+            ["data"] = reply.IsSuccess ? reply.Data?.DeepClone() : null,
         };
         if (Version == OneBotVersion.V11)
         {
-            if (!reply.IsSuccess && !string.IsNullOrEmpty(reply.Message))
+            if (!accepted && !reply.IsSuccess && !string.IsNullOrEmpty(reply.Message))
             {
                 payload["data"] = new JsonObject { ["message"] = reply.Message };
             }
@@ -166,6 +258,11 @@ public sealed class OneBotProtocol : IProtocolImplementation
         DomainEvent domainEvent,
         CancellationToken cancellationToken = default)
     {
+        if (domainEvent.SelfId == SelfId && domainEvent.Payload is BotPresenceChangedEvent changed)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(EncodePresence(domainEvent, changed.Presence));
+        }
         return domainEvent.SelfId == SelfId
             ? _events.EncodeAsync(domainEvent, cancellationToken)
             : Task.FromResult<IReadOnlyList<OutboundFrame>>([]);
@@ -222,7 +319,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
                 ["post_type"] = "meta_event",
                 ["meta_event_type"] = "heartbeat",
                 ["status"] = StatusPayload(),
-                ["interval"] = 15_000,
+                ["interval"] = HeartbeatIntervalMilliseconds,
             })
             : new OutboundFrame(new JsonObject
             {
@@ -232,8 +329,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
                 ["detail_type"] = "heartbeat",
                 ["sub_type"] = string.Empty,
                 ["self"] = SelfObject(),
-                ["interval"] = 15_000,
-                ["status"] = StatusPayload(),
+                ["interval"] = HeartbeatIntervalMilliseconds,
             });
         return Task.FromResult<OutboundFrame?>(frame);
     }
@@ -243,6 +339,20 @@ public sealed class OneBotProtocol : IProtocolImplementation
         ChatScene? forcedScene,
         CancellationToken cancellationToken)
     {
+        if (Version == OneBotVersion.V12)
+        {
+            var detailType = call.GetText("detail_type");
+            if (detailType is null)
+            {
+                return Invalid("Missing detail_type");
+            }
+
+            if (detailType is not ("private" or "group"))
+            {
+                return new ProtocolReply(10004, Message: $"Unsupported detail_type: {detailType}");
+            }
+        }
+
         var scene = forcedScene ?? ResolveScene(call);
         var peerId = call.GetId(scene == ChatScene.Group ? "group_id" : "user_id");
         if (peerId is null)
@@ -250,11 +360,21 @@ public sealed class OneBotProtocol : IProtocolImplementation
             return Invalid(scene == ChatScene.Group ? "Missing group_id" : "Missing user_id");
         }
 
+        if (Version == OneBotVersion.V12
+            && (call.Parameters[scene == ChatScene.Group ? "group_id" : "user_id"] is not System.Text.Json.Nodes.JsonValue target
+                || !target.TryGetValue<string>(out _)))
+        {
+            return Invalid("Message target ID must be a string");
+        }
+
         var raw = call.Parameters["message"];
         IReadOnlyList<MessageSegment> content = raw switch
         {
             JsonArray array => await _segments.DecodeAsync(array, cancellationToken).ConfigureAwait(false),
-            System.Text.Json.Nodes.JsonValue value when value.TryGetValue<string>(out var text) => [new TextSegment(text)],
+            System.Text.Json.Nodes.JsonValue value when Version == OneBotVersion.V11 && value.TryGetValue<string>(out var text) =>
+                call.GetBoolean("auto_escape") == true
+                    ? [new TextSegment(text)]
+                    : await _segments.DecodeAsync(OneBotSegmentCodec.ParseCqString(text), cancellationToken).ConfigureAwait(false),
             _ => [],
         };
         if (content.Count == 0)
@@ -287,7 +407,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
         }
 
         _ = await _platform.RecallMessageAsync(messageId, SelfId, cancellationToken).ConfigureAwait(false);
-        return ProtocolReply.Success();
+        return new ProtocolReply();
     }
 
     private async Task<ProtocolReply> GetMessageAsync(ProtocolCall call, CancellationToken cancellationToken)
@@ -303,6 +423,12 @@ public sealed class OneBotProtocol : IProtocolImplementation
             {
                 ResourceId = messageId,
             };
+        if (message.SelfId != SelfId)
+        {
+            throw new PlatformException(PlatformError.MessageNotFound, $"Message not found: {messageId}");
+        }
+        if (message.Anonymous is not null && Version != OneBotVersion.V11)
+            return new ProtocolReply(10004, Message: "Anonymous messages are not supported by this protocol");
         var encoded = await _segments.EncodeAsync(message.Content, cancellationToken).ConfigureAwait(false);
         if (Version == OneBotVersion.V11)
         {
@@ -312,7 +438,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
                 ["message_type"] = message.Scene == ChatScene.Group ? "group" : "private",
                 ["message_id"] = JsonExtensions.NumericId(message.Id),
                 ["real_id"] = JsonExtensions.NumericId(message.Id),
-                ["sender"] = await _context.SenderInfoAsync(
+                ["sender"] = message.Anonymous is { } anonymous ? OneBotAnonymousEncoder.Sender(anonymous) : await _context.SenderInfoAsync(
                     message.SenderId,
                     message.Scene == ChatScene.Group ? message.PeerId : null,
                     cancellationToken).ConfigureAwait(false),
@@ -337,6 +463,33 @@ public sealed class OneBotProtocol : IProtocolImplementation
         return ProtocolReply.Success(result);
     }
 
+    private async Task<ProtocolReply> GetForwardAsync(ProtocolCall call, CancellationToken cancellationToken)
+    {
+        if (call.GetText("id") is not { } id)
+        {
+            return Invalid("Missing id");
+        }
+
+        var nodes = await _store.GetForwardNodesAsync(id, SelfId, cancellationToken).ConfigureAwait(false)
+            ?? throw new PlatformException(PlatformError.MessageNotFound, $"Forwarded message not found: {id}");
+        var result = new JsonArray();
+        foreach (var node in nodes)
+        {
+            result.Add(new JsonObject
+            {
+                ["type"] = "node",
+                ["data"] = new JsonObject
+                {
+                    ["user_id"] = node.SenderId,
+                    ["nickname"] = node.SenderName,
+                    ["content"] = await _segments.EncodeAsync(node.Content, cancellationToken).ConfigureAwait(false),
+                },
+            });
+        }
+
+        return ProtocolReply.Success(new JsonObject { ["message"] = result });
+    }
+
     private async Task<ProtocolReply> LoginInfoAsync(CancellationToken cancellationToken)
     {
         var user = await _store.GetUserAsync(SelfId, cancellationToken).ConfigureAwait(false);
@@ -346,8 +499,8 @@ public sealed class OneBotProtocol : IProtocolImplementation
             : new JsonObject
             {
                 ["user_id"] = SelfId,
-                ["user_name"] = nickname,
-                ["user_displayname"] = nickname,
+                ["user_name"] = user?.Name ?? SelfId,
+                ["user_displayname"] = user?.Nickname ?? string.Empty,
             });
     }
 
@@ -388,8 +541,8 @@ public sealed class OneBotProtocol : IProtocolImplementation
                 : new JsonObject
                 {
                     ["user_id"] = entry.User.Id,
-                    ["user_name"] = entry.User.DisplayName,
-                    ["user_displayname"] = entry.Friendship.Remark,
+                    ["user_name"] = entry.User.Name,
+                    ["user_displayname"] = entry.User.Nickname,
                     ["user_remark"] = entry.Friendship.Remark,
                 });
         }
@@ -423,6 +576,11 @@ public sealed class OneBotProtocol : IProtocolImplementation
         var result = new JsonArray();
         foreach (var group in await _store.GetAllGroupsAsync(cancellationToken).ConfigureAwait(false))
         {
+            if (await _store.GetMemberAsync(group.Id, SelfId, cancellationToken).ConfigureAwait(false) is null)
+            {
+                continue;
+            }
+
             if (await _context.GroupInfoAsync(group.Id, cancellationToken).ConfigureAwait(false) is { } info)
             {
                 if (Version == OneBotVersion.V11)
@@ -505,7 +663,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
         }
 
         await _platform.SetGroupNameAsync(groupId, SelfId, name, cancellationToken).ConfigureAwait(false);
-        return ProtocolReply.Success();
+        return new ProtocolReply();
     }
 
     private async Task<ProtocolReply> SetGroupCardAsync(ProtocolCall call, CancellationToken cancellationToken)
@@ -521,7 +679,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
             SelfId,
             call.GetText("card") ?? string.Empty,
             cancellationToken).ConfigureAwait(false);
-        return ProtocolReply.Success();
+        return new ProtocolReply();
     }
 
     private async Task<ProtocolReply> SetGroupTitleAsync(ProtocolCall call, CancellationToken cancellationToken)
@@ -537,7 +695,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
             SelfId,
             call.GetText("special_title") ?? string.Empty,
             cancellationToken).ConfigureAwait(false);
-        return ProtocolReply.Success();
+        return new ProtocolReply();
     }
 
     private async Task<ProtocolReply> SetGroupAdminAsync(ProtocolCall call, CancellationToken cancellationToken)
@@ -553,7 +711,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
             SelfId,
             call.GetBoolean("enable") ?? true,
             cancellationToken).ConfigureAwait(false);
-        return ProtocolReply.Success();
+        return new ProtocolReply();
     }
 
     private async Task<ProtocolReply> SetGroupBanAsync(ProtocolCall call, CancellationToken cancellationToken)
@@ -569,7 +727,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
             SelfId,
             TimeSpan.FromSeconds(call.GetLong("duration") ?? 1800),
             cancellationToken).ConfigureAwait(false);
-        return ProtocolReply.Success();
+        return new ProtocolReply();
     }
 
     private async Task<ProtocolReply> SetGroupWholeBanAsync(ProtocolCall call, CancellationToken cancellationToken)
@@ -584,7 +742,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
             SelfId,
             call.GetBoolean("enable") ?? true,
             cancellationToken).ConfigureAwait(false);
-        return ProtocolReply.Success();
+        return new ProtocolReply();
     }
 
     private async Task<ProtocolReply> KickMemberAsync(ProtocolCall call, CancellationToken cancellationToken)
@@ -600,7 +758,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
             SelfId,
             GroupMemberChangeReason.Administrative,
             cancellationToken).ConfigureAwait(false);
-        return ProtocolReply.Success();
+        return new ProtocolReply();
     }
 
     private async Task<ProtocolReply> LeaveGroupAsync(ProtocolCall call, CancellationToken cancellationToken)
@@ -610,13 +768,20 @@ public sealed class OneBotProtocol : IProtocolImplementation
             return Invalid("Missing group_id");
         }
 
+        if (Version == OneBotVersion.V11 && call.GetBoolean("is_dismiss") == true
+            && (await _store.GetMemberAsync(groupId, SelfId, cancellationToken).ConfigureAwait(false))?.Role == GroupRole.Owner)
+        {
+            await _platform.DeleteGroupAsync(groupId, SelfId, cancellationToken).ConfigureAwait(false);
+            return ProtocolReply.Success();
+        }
+
         await _platform.RemoveMemberAsync(
             groupId,
             SelfId,
             SelfId,
             GroupMemberChangeReason.Voluntary,
             cancellationToken).ConfigureAwait(false);
-        return ProtocolReply.Success();
+        return new ProtocolReply();
     }
 
     private async Task<ProtocolReply> ResolveRequestAsync(ProtocolCall call, CancellationToken cancellationToken)
@@ -626,20 +791,37 @@ public sealed class OneBotProtocol : IProtocolImplementation
             return Invalid("Missing flag");
         }
 
+        var request = await _store.GetRequestByFlagAsync(flag, SelfId, cancellationToken).ConfigureAwait(false)
+            ?? throw new PlatformException(PlatformError.RequestNotFound, $"Request not found: {flag}");
+        if (request.SelfId != SelfId)
+        {
+            throw new PlatformException(PlatformError.RequestNotFound, $"Request not found: {flag}");
+        }
+
+        var friendAction = call.Name.StartsWith("set_friend_add_request", StringComparison.Ordinal);
+        var subtype = call.GetText("sub_type") ?? call.GetText("type");
+        if (friendAction != (request.Kind == RequestKind.Friend)
+            || (!friendAction && subtype != (request.Kind is RequestKind.GroupJoin or RequestKind.GroupInvitedJoin ? "add" : "invite")))
+        {
+            return Invalid("Request flag does not match the action or sub_type");
+        }
+
         await _platform.ResolveRequestAsync(
             flag,
             call.GetBoolean("approve") ?? true,
             call.GetText("reason") ?? string.Empty,
             call.GetText("remark") ?? string.Empty,
-            cancellationToken).ConfigureAwait(false);
-        return ProtocolReply.Success();
+            expectedSelfId: SelfId,
+            expectedRequestId: request.Id,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return new ProtocolReply();
     }
 
     private ProtocolReply Status() => ProtocolReply.Success(StatusPayload());
 
     private ProtocolReply VersionInfo() => ProtocolReply.Success(VersionPayload());
 
-    private static ProtocolReply SupportedActions()
+    private ProtocolReply SupportedActions()
     {
         var result = new JsonArray();
         foreach (var action in Actions.Order(StringComparer.Ordinal))
@@ -657,9 +839,25 @@ public sealed class OneBotProtocol : IProtocolImplementation
         {
             "group" => ChatScene.Group,
             "private" => ChatScene.Friend,
-            _ => call.GetId("group_id") is null ? ChatScene.Friend : ChatScene.Group,
+            null => call.GetId("group_id") is null ? ChatScene.Friend : ChatScene.Group,
+            _ => throw new ArgumentException($"Unsupported message type: {declared}"),
         };
     }
+
+    private static string[] RequiredV12StringParameters(string action) => action switch
+    {
+        "send_message" => ["detail_type"],
+        "delete_message" => ["message_id"],
+        "get_user_info" => ["user_id"],
+        "get_group_info" or "get_group_member_list" or "leave_group" => ["group_id"],
+        "get_group_member_info" => ["group_id", "user_id"],
+        "set_group_name" => ["group_id", "group_name"],
+        "upload_file" => ["type", "name"],
+        "get_file" => ["type", "file_id"],
+        "upload_file_fragmented" => ["stage"],
+        "get_file_fragmented" => ["stage", "file_id"],
+        _ => [],
+    };
 
     private JsonObject SelfObject() => new()
     {
@@ -681,21 +879,6 @@ public sealed class OneBotProtocol : IProtocolImplementation
             ["onebot_version"] = "12",
         };
 
-    private JsonObject StatusPayload() => Version == OneBotVersion.V11
-        ? new JsonObject { ["online"] = true, ["good"] = true }
-        : new JsonObject
-        {
-            ["good"] = true,
-            ["bots"] = new JsonArray
-            {
-                new JsonObject
-                {
-                    ["self"] = SelfObject(),
-                    ["online"] = true,
-                },
-            },
-        };
-
     private ProtocolReply Invalid(string detail) => new(
         Version == OneBotVersion.V11 ? 1400 : 10003,
         Message: detail);
@@ -715,7 +898,7 @@ public sealed class OneBotProtocol : IProtocolImplementation
             or PlatformError.Muted
             or PlatformError.WholeGroupMuted;
         var retCode = notFound
-            ? 1404
+            ? Version == OneBotVersion.V11 ? 1404 : 35000
             : forbidden
                 ? Version == OneBotVersion.V11 ? 1403 : 34000
                 : Version == OneBotVersion.V11 ? 1400 : 10003;

@@ -14,6 +14,7 @@ public enum TransportMode
     WebSocketServer,
     WebSocketClient,
     MilkyService,
+    OneBotHttpServer,
 }
 
 public sealed record ConnectionSettings
@@ -37,12 +38,20 @@ public sealed record ConnectionSettings
     public string AccessToken { get; init; } = string.Empty;
 
     public IReadOnlyList<string> MilkyWebhookUrls { get; init; } = [];
+    public IReadOnlyList<string> OneBotWebhookUrls { get; init; } = [];
+    public string OneBotWebhookSecret { get; init; } = string.Empty;
+    public TimeSpan OneBotWebhookTimeout { get; init; } = TimeSpan.Zero;
 
     public bool AutoReconnect { get; init; } = true;
 
     public TimeSpan ReconnectInterval { get; init; } = TimeSpan.FromSeconds(3);
 
     public bool PostSelfEvents { get; init; }
+
+    public bool OneBotHttpEventsEnabled { get; init; } = true;
+
+    /// <summary>Maximum queued V12 HTTP events; zero keeps an unbounded queue.</summary>
+    public int OneBotHttpEventBufferSize { get; init; } = 256;
 
     /// <summary>
     /// Allows an unauthenticated listener or a clear-text listener beyond loopback.
@@ -63,15 +72,21 @@ public sealed record ConnectionSettings
     public Uri EventStreamUri => new UriBuilder(Uri.UriSchemeWs, Host, Port, "/event").Uri;
 
     public IReadOnlyList<Uri> GetWebhookEndpoints()
+        => ValidateWebhookEndpoints(MilkyWebhookUrls, "Milky");
+
+    public IReadOnlyList<Uri> GetOneBotWebhookEndpoints()
+        => ValidateWebhookEndpoints(OneBotWebhookUrls, "OneBot");
+
+    private List<Uri> ValidateWebhookEndpoints(IReadOnlyList<string> urls, string protocol)
     {
-        var result = new List<Uri>(MilkyWebhookUrls.Count);
-        foreach (var raw in MilkyWebhookUrls)
+        var result = new List<Uri>(urls.Count);
+        foreach (var raw in urls)
         {
             if (!Uri.TryCreate(raw.Trim(), UriKind.Absolute, out var uri)
                 || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
                 || string.IsNullOrWhiteSpace(uri.Host))
             {
-                throw new ArgumentException($"Invalid Milky WebHook URL: {raw}", nameof(MilkyWebhookUrls));
+                throw new ArgumentException($"Invalid {protocol} WebHook URL.", nameof(urls));
             }
 
             if (uri.Scheme == Uri.UriSchemeHttp
@@ -79,7 +94,7 @@ public sealed record ConnectionSettings
                 && !AllowInsecureRemoteAccess)
             {
                 throw new InvalidOperationException(
-                    "A non-loopback Milky WebHook must use HTTPS. "
+                    "A non-loopback WebHook must use HTTPS. "
                     + "Set AllowInsecureRemoteAccess only for an isolated test network.");
             }
 
@@ -91,6 +106,9 @@ public sealed record ConnectionSettings
 
     public void Validate()
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(OneBotHttpEventBufferSize);
+        if (OneBotWebhookTimeout < TimeSpan.Zero || OneBotWebhookTimeout.TotalMilliseconds > uint.MaxValue - 1)
+            throw new ArgumentOutOfRangeException(nameof(OneBotWebhookTimeout), "WebHook timeout must be between 0 and 4294967294 ms.");
         if (string.IsNullOrWhiteSpace(Host))
         {
             throw new ArgumentException("Host cannot be empty.", nameof(Host));
@@ -123,8 +141,12 @@ public sealed record ConnectionSettings
         {
             _ = GetWebhookEndpoints();
         }
+        else
+        {
+            _ = GetOneBotWebhookEndpoints();
+        }
 
-        if (Transport is TransportMode.WebSocketServer or TransportMode.MilkyService)
+        if (Transport is TransportMode.WebSocketServer or TransportMode.MilkyService or TransportMode.OneBotHttpServer)
         {
             if (string.IsNullOrWhiteSpace(AccessToken) && !AllowInsecureRemoteAccess)
             {

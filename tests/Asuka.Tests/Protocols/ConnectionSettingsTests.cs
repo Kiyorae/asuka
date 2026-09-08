@@ -7,6 +7,19 @@ namespace Asuka.Tests.Protocols;
 public sealed class ConnectionSettingsTests
 {
     [TestMethod]
+    public void OneBotWebhooksKeepTransportSecurityAndRejectInvalidTimeouts()
+    {
+        var settings = new ConnectionSettings { AccessToken = "fixture-token", OneBotWebhookUrls = ["http://192.0.2.25/event"] };
+        Assert.ThrowsExactly<InvalidOperationException>(settings.Validate);
+        (settings with { OneBotWebhookUrls = ["http://localhost:8010/events"] }).Validate();
+        (settings with { OneBotWebhookUrls = ["https://example.test/events"] }).Validate();
+        (settings with { AllowInsecureRemoteAccess = true }).Validate();
+        Assert.ThrowsExactly<ArgumentException>((settings with { OneBotWebhookUrls = ["file:///tmp/events"] }).Validate);
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>((settings with { OneBotWebhookTimeout = TimeSpan.FromMilliseconds(-1) }).Validate);
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>((settings with { OneBotWebhookTimeout = TimeSpan.FromMilliseconds(uint.MaxValue) }).Validate);
+    }
+
+    [TestMethod]
     public void ServerListenerRequiresTokenAndRemoteClearTextOptIn()
     {
         var insecure = new ConnectionSettings

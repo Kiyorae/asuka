@@ -38,6 +38,8 @@ internal static class JsonExtensions
                 return number.ToString("0.################", CultureInfo.InvariantCulture);
             }
 
+            if (scalar.GetValueKind() == JsonValueKind.Number) return scalar.ToJsonString();
+
             if (scalar.TryGetValue<bool>(out var boolean))
             {
                 return boolean ? "true" : "false";
@@ -60,6 +62,14 @@ internal static class JsonExtensions
             return Math.Abs((double)integer) <= MaxSafeJsonInteger ? integer : null;
         }
 
+        // JsonValue.Create(3) holds an Int32, while parsed JSON and explicit long
+        // values may hold different CLR types. Preserve integral JSON values.
+        if (scalar.GetValueKind() == JsonValueKind.Number
+            && long.TryParse(scalar.ToJsonString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out integer))
+        {
+            return Math.Abs((double)integer) <= MaxSafeJsonInteger ? integer : null;
+        }
+
         if (scalar.TryGetValue<double>(out var number)
             && number is >= -MaxSafeJsonInteger and <= MaxSafeJsonInteger
             && Math.Truncate(number) == number)
@@ -67,11 +77,6 @@ internal static class JsonExtensions
             return checked((long)number);
         }
 
-
-        if (scalar.TryGetValue<bool>(out var boolean))
-        {
-            return boolean ? 1 : 0;
-        }
 
         return scalar.TryGetValue<string>(out var text)
             && long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out integer)
@@ -96,6 +101,8 @@ internal static class JsonExtensions
         {
             return integer != 0;
         }
+
+        if (scalar.TryGetValue<int>(out var smallInteger)) return smallInteger != 0;
 
         if (scalar.TryGetValue<string>(out var text))
         {

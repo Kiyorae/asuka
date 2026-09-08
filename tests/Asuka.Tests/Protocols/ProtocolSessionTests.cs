@@ -125,21 +125,70 @@ public sealed class ProtocolSessionTests
         Assert.IsTrue(status["status"]!["good"]!.GetValue<bool>());
         Assert.AreEqual(SessionStateKind.Connected, session.State.Kind);
 
+        var malformedJson = await SendAndReceiveJsonAsync(socket, "{");
+        Assert.AreEqual(10001, malformedJson["retcode"]!.GetValue<int>());
+
+        var arrayRoot = await SendAndReceiveJsonAsync(socket, "[]");
+        Assert.AreEqual(10001, arrayRoot["retcode"]!.GetValue<int>());
+
+        var missingParameters = await SendAndReceiveJsonAsync(
+            socket,
+            "{\"action\":\"set_group_name\",\"echo\":\"missing-params\"}");
+        Assert.AreEqual(10001, missingParameters["retcode"]!.GetValue<int>());
+        Assert.AreEqual("missing-params", missingParameters["echo"]!.GetValue<string>());
+
+        var wrongParameters = await SendAndReceiveJsonAsync(
+            socket,
+            "{\"action\":\"set_group_name\",\"params\":[],\"echo\":\"wrong-params\"}");
+        Assert.AreEqual(10001, wrongParameters["retcode"]!.GetValue<int>());
+        Assert.AreEqual("wrong-params", wrongParameters["echo"]!.GetValue<string>());
+
+        var objectEcho = await SendAndReceiveJsonAsync(
+            socket,
+            "{\"action\":\"set_group_name\",\"params\":{},\"echo\":{}}");
+        Assert.AreEqual(10001, objectEcho["retcode"]!.GetValue<int>());
+        Assert.IsFalse(objectEcho.ContainsKey("echo"));
+
+        var nullEcho = await SendAndReceiveJsonAsync(
+            socket,
+            "{\"action\":\"set_group_name\",\"params\":{},\"echo\":null}");
+        Assert.AreEqual(10001, nullEcho["retcode"]!.GetValue<int>());
+        Assert.IsFalse(nullEcho.ContainsKey("echo"));
+
+        var nestedDuplicate = await SendAndReceiveJsonAsync(
+            socket,
+            "{\"action\":\"set_group_name\",\"params\":{},\"extension\":{\"key\":1,\"key\":2},\"echo\":\"nested-duplicate\"}");
+        Assert.AreEqual(10001, nestedDuplicate["retcode"]!.GetValue<int>());
+        Assert.AreEqual("nested-duplicate", nestedDuplicate["echo"]!.GetValue<string>());
+
+        await SendJsonAsync(socket, new JsonObject
+        {
+            ["action"] = "set_group_name",
+            ["params"] = new JsonObject { ["group_id"] = ProtocolTestFixture.GroupId, ["group_name"] = "Wrong account" },
+            ["self"] = new JsonObject { ["platform"] = "qq", ["user_id"] = "unknown-bot" },
+            ["echo"] = "foreign-self",
+        });
+        var rejected = await ReceiveJsonAsync(socket);
+        Assert.AreEqual(10102, rejected["retcode"]!.GetValue<int>());
+        Assert.AreEqual("foreign-self", rejected["echo"]!.GetValue<string>());
+        Assert.AreEqual("Protocol Test Group", (await fixture.Store.GetGroupAsync(ProtocolTestFixture.GroupId))!.Name);
+
         await SendJsonAsync(socket, new JsonObject
         {
             ["action"] = "get_supported_actions",
             ["params"] = new JsonObject(),
-            ["echo"] = new JsonObject { ["request_id"] = "wire-1" },
+            ["echo"] = "wire-1",
         });
         var reply = await ReceiveJsonAsync(socket);
         Assert.AreEqual("ok", reply["status"]!.GetValue<string>());
         Assert.AreEqual(0, reply["retcode"]!.GetValue<int>());
-        Assert.AreEqual("wire-1", reply["echo"]!["request_id"]!.GetValue<string>());
+        Assert.AreEqual("wire-1", reply["echo"]!.GetValue<string>());
         var actions = (JsonArray)reply["data"]!;
         Assert.IsTrue(actions.Any(
-            static action => action!.GetValue<string>() == "send_group_msg"));
+            static action => action!.GetValue<string>() == "send_message"));
         Assert.IsTrue(actions.Any(
             static action => action!.GetValue<string>() == "get_supported_actions"));
+
     }
 
     private static StringContent JsonContent(string json) => new(json, Encoding.UTF8, "application/json");
@@ -153,7 +202,18 @@ public sealed class ProtocolSessionTests
 
     private static async Task SendJsonAsync(ClientWebSocket socket, JsonObject payload)
     {
-        var bytes = Encoding.UTF8.GetBytes(payload.ToJsonString());
+        await SendTextAsync(socket, payload.ToJsonString());
+    }
+
+    private static async Task<JsonObject> SendAndReceiveJsonAsync(ClientWebSocket socket, string payload)
+    {
+        await SendTextAsync(socket, payload);
+        return await ReceiveJsonAsync(socket);
+    }
+
+    private static async Task SendTextAsync(ClientWebSocket socket, string payload)
+    {
+        var bytes = Encoding.UTF8.GetBytes(payload);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         await socket.SendAsync(
             new ArraySegment<byte>(bytes),

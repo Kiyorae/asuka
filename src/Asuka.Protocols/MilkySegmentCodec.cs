@@ -32,11 +32,12 @@ internal sealed class MilkySegmentCodec(MediaService media, AsukaStore store)
         foreach (var node in segments)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (node is JsonObject raw
-                && await DecodeOutgoingAsync(raw, conversation, cancellationToken).ConfigureAwait(false) is { } segment)
+            if (node is not JsonObject raw)
             {
-                result.Add(segment);
+                throw new ArgumentException("Every message segment must be an object with type and data");
             }
+
+            result.Add(await DecodeOutgoingAsync(raw, conversation, cancellationToken).ConfigureAwait(false));
         }
 
         return result;
@@ -64,7 +65,7 @@ internal sealed class MilkySegmentCodec(MediaService media, AsukaStore store)
                     });
                 }
             case FaceSegment face:
-                return Segment("face", new JsonObject { ["face_id"] = face.Id, ["is_large"] = false });
+                return Segment("face", new JsonObject { ["face_id"] = face.Id, ["is_large"] = face.IsLarge });
             case ImageSegment image:
                 {
                     var reference = await media.GetReferenceAsync(
@@ -80,8 +81,8 @@ internal sealed class MilkySegmentCodec(MediaService media, AsukaStore store)
                         ["temp_url"] = reference.Url,
                         ["width"] = width,
                         ["height"] = height,
-                        ["summary"] = resolvedAsset.Name,
-                        ["sub_type"] = "normal",
+                        ["summary"] = image.Summary ?? resolvedAsset.Name,
+                        ["sub_type"] = image.SubType,
                     });
                 }
             case RecordSegment record:
@@ -129,7 +130,7 @@ internal sealed class MilkySegmentCodec(MediaService media, AsukaStore store)
             case ReplySegment reply:
                 {
                     var message = await store.GetMessageAsync(reply.MessageId, cancellationToken).ConfigureAwait(false);
-                    if (message is null)
+                    if (message is null || message.IsRecalled || message.Anonymous is not null)
                     {
                         return null;
                     }
@@ -147,75 +148,86 @@ internal sealed class MilkySegmentCodec(MediaService media, AsukaStore store)
             case ForwardSegment forward:
                 {
                     var preview = new JsonArray();
-                    foreach (var node in forward.Nodes.Take(4))
+                    foreach (var line in forward.Preview ?? forward.Nodes.Take(4)
+                        .Select(static node => $"{node.SenderName}: {node.Content.TextPreview()}").ToArray())
                     {
-                        preview.Add($"{node.SenderName}: {node.Content.TextPreview()}");
+                        preview.Add(line);
                     }
 
                     return Segment("forward", new JsonObject
                     {
                         ["forward_id"] = forward.Id,
-                        ["title"] = "Forwarded messages",
+                        ["title"] = forward.Title ?? "Forwarded messages",
                         ["preview"] = preview,
-                        ["summary"] = $"View {forward.Nodes.Count} forwarded messages",
+                        ["summary"] = forward.Summary ?? $"View {forward.Nodes.Count} forwarded messages",
                     });
                 }
             case UnsupportedSegment unsupported:
-                return Segment("text", new JsonObject { ["text"] = $"[{unsupported.Type}]" });
+                return EncodeStructuredSegment(unsupported);
             default:
                 return null;
         }
     }
 
-    private async Task<MessageSegment?> DecodeOutgoingAsync(
+    private async Task<MessageSegment> DecodeOutgoingAsync(
         JsonObject raw,
         Chat conversation,
         CancellationToken cancellationToken)
     {
-        var type = raw.GetFlexibleString("type");
-        var data = raw["data"] as JsonObject ?? new JsonObject();
+        var type = RequiredText(raw, "type");
+        var data = raw["data"] as JsonObject
+            ?? throw new ArgumentException($"{type} segment requires a data object");
         return type switch
         {
-            "text" => new TextSegment(data.GetFlexibleString("text") ?? string.Empty),
-            "mention" => new MentionSegment(data.GetFlexibleString("user_id")),
+            "text" => new TextSegment(RequiredText(data, "text", allowEmpty: true)),
+            "mention" => new MentionSegment(RequiredText(data, "user_id")),
             "mention_all" => new MentionSegment(null),
-            "face" when data.GetFlexibleString("face_id") is { } faceId => new FaceSegment(faceId),
+            "face" => new FaceSegment(RequiredText(data, "face_id"),
+                IsLarge: data.GetFlexibleBoolean("is_large") ?? false),
             "image" => await IngestAsync(data, ProtocolAssetKind.Image, cancellationToken).ConfigureAwait(false),
             "record" => await IngestAsync(data, ProtocolAssetKind.Record, cancellationToken).ConfigureAwait(false),
             "video" => await IngestAsync(data, ProtocolAssetKind.Video, cancellationToken).ConfigureAwait(false),
-            "reply" when data.GetFlexibleInt64("message_seq") is { } seq =>
-                await ReplyAsync(conversation, seq, cancellationToken).ConfigureAwait(false),
+            "reply" => await ReplyAsync(conversation,
+                data.GetFlexibleInt64("message_seq") ?? throw new ArgumentException("reply requires message_seq"),
+                cancellationToken).ConfigureAwait(false),
             "forward" => await DecodeForwardAsync(data, conversation, cancellationToken).ConfigureAwait(false),
-            null => null,
-            _ => new UnsupportedSegment(
-                type,
-                Asuka.Core.JsonValue.Parse((type == "light_app" ? data : raw).ToJsonString())),
+            "light_app" => DecodeLightApp(data),
+            _ => throw new ArgumentException($"Unsupported Milky outgoing segment: {type}"),
         };
     }
 
-    private async Task<MessageSegment?> IngestAsync(
+    private async Task<MessageSegment> IngestAsync(
         JsonObject data,
         ProtocolAssetKind kind,
         CancellationToken cancellationToken)
     {
-        var uri = data.GetFlexibleString("uri");
-        if (uri is null)
+        var uri = RequiredText(data, "uri");
+        var subType = data.GetFlexibleString("sub_type") ?? "normal";
+        if (kind == ProtocolAssetKind.Image && subType is not ("normal" or "sticker"))
         {
-            return null;
+            throw new ArgumentException("image sub_type must be normal or sticker");
         }
 
-        var asset = await media.ResolveReferenceAsync(uri, null, kind, cancellationToken).ConfigureAwait(false);
-        return (kind, asset) switch
+        var asset = await media.ResolveReferenceAsync(uri, null, kind, cancellationToken).ConfigureAwait(false)
+            ?? throw new ArgumentException($"Unable to resolve {kind} URI");
+        Asset? thumbnail = null;
+        if (kind == ProtocolAssetKind.Video && data.GetFlexibleString("thumb_uri") is { } thumbnailUri)
         {
-            (_, null) => null,
-            (ProtocolAssetKind.Image, { } value) => new ImageSegment(value),
-            (ProtocolAssetKind.Record, { } value) => new RecordSegment(value),
-            (ProtocolAssetKind.Video, { } value) => new VideoSegment(value),
-            _ => new FileSegment(asset!),
+            thumbnail = await media.ResolveReferenceAsync(thumbnailUri, null,
+                ProtocolAssetKind.Image, cancellationToken).ConfigureAwait(false)
+                ?? throw new ArgumentException("Unable to resolve video thumbnail URI");
+        }
+
+        return kind switch
+        {
+            ProtocolAssetKind.Image => new ImageSegment(asset, subType, data.GetFlexibleString("summary")),
+            ProtocolAssetKind.Record => new RecordSegment(asset),
+            ProtocolAssetKind.Video => new VideoSegment(asset, thumbnail),
+            _ => new FileSegment(asset),
         };
     }
 
-    private async Task<MessageSegment?> ReplyAsync(
+    private async Task<MessageSegment> ReplyAsync(
         Chat conversation,
         long sequence,
         CancellationToken cancellationToken)
@@ -226,42 +238,101 @@ internal sealed class MilkySegmentCodec(MediaService media, AsukaStore store)
             sequence,
             conversation.SelfId,
             cancellationToken).ConfigureAwait(false);
-        return message is null ? null : new ReplySegment(message.Id);
+        return message is null || message.IsRecalled || message.Anonymous is not null
+            ? throw new ArgumentException($"Referenced message not found: {sequence}")
+            : new ReplySegment(message.Id, message.SenderId);
     }
 
-    private async Task<MessageSegment?> DecodeForwardAsync(
+    private async Task<MessageSegment> DecodeForwardAsync(
         JsonObject data,
         Chat conversation,
         CancellationToken cancellationToken)
     {
-        if (data["messages"] is not JsonArray messages)
+        if (data["messages"] is not JsonArray { Count: > 0 } messages)
         {
-            return null;
+            throw new ArgumentException("forward requires a nonempty messages array");
+        }
+
+        var preview = data["preview"] as JsonArray;
+        if (data["preview"] is not null && (preview is null || preview.Count is < 1 or > 4
+            || preview.Any(static entry => entry is not System.Text.Json.Nodes.JsonValue value
+                || !value.TryGetValue<string>(out _))))
+        {
+            throw new ArgumentException("forward preview must contain between 1 and 4 strings");
         }
 
         var nodes = new List<ForwardNode>(messages.Count);
-        foreach (var entry in messages.OfType<JsonObject>())
+        foreach (var node in messages)
         {
-            var senderId = entry.GetFlexibleString("user_id");
-            if (senderId is null)
+            if (node is not JsonObject entry || entry["segments"] is not JsonArray { Count: > 0 } nodeSegments)
             {
-                continue;
+                throw new ArgumentException("Every forwarded message requires nonempty segments");
             }
 
+            var senderId = RequiredText(entry, "user_id");
+            var senderName = RequiredText(entry, "sender_name", allowEmpty: true);
             var content = await DecodeOutgoingAsync(
-                entry["segments"] as JsonArray ?? new JsonArray(),
+                nodeSegments,
                 conversation,
                 cancellationToken).ConfigureAwait(false);
             nodes.Add(new ForwardNode(
                 senderId,
-                entry.GetFlexibleString("sender_name") ?? senderId,
+                senderName,
                 content,
                 time: entry.GetFlexibleInt64("time") is { } time
                     ? DateTimeOffset.FromUnixTimeSeconds(time)
                     : DateTimeOffset.UtcNow));
         }
 
-        return new ForwardSegment(IdGenerator.MessageId(), nodes);
+        return new ForwardSegment(IdGenerator.MessageId(), nodes,
+            data.GetFlexibleString("title"), data.GetFlexibleString("summary"),
+            preview?.Select(static entry => entry!.GetValue<string>()).ToArray(), data.GetFlexibleString("prompt"));
+    }
+
+    private static UnsupportedSegment DecodeLightApp(JsonObject data)
+    {
+        var json = RequiredText(data, "json_payload");
+        JsonObject payload;
+        try
+        {
+            payload = JsonNode.Parse(json) as JsonObject
+                ?? throw new ArgumentException("light_app json_payload must encode an object");
+        }
+        catch (System.Text.Json.JsonException error)
+        {
+            throw new ArgumentException("light_app json_payload must contain valid JSON", error);
+        }
+
+        return new UnsupportedSegment("light_app", Asuka.Core.JsonValue.Parse(new JsonObject
+        {
+            ["json_payload"] = json,
+            ["app_name"] = payload.GetFlexibleString("app") ?? string.Empty,
+        }.ToJsonString()));
+    }
+
+    private static JsonObject EncodeStructuredSegment(UnsupportedSegment segment)
+    {
+        if (segment.Type is "light_app" or "xml" or "markdown" or "market_face"
+            && JsonNode.Parse(segment.Payload.ToJsonString()) is JsonObject payload)
+        {
+            var data = payload["data"] as JsonObject ?? payload;
+            if (segment.Type == "light_app" && data["app_name"] is null)
+            {
+                data["app_name"] = string.Empty;
+            }
+
+            return Segment(segment.Type, (JsonObject)data.DeepClone());
+        }
+
+        return Segment("text", new JsonObject { ["text"] = segment.TextPreview });
+    }
+
+    private static string RequiredText(JsonObject data, string name, bool allowEmpty = false)
+    {
+        var value = data.GetFlexibleString(name);
+        return value is not null && (allowEmpty || !string.IsNullOrWhiteSpace(value))
+            ? value
+            : throw new ArgumentException($"Missing or invalid {name}");
     }
 
     private static JsonObject Segment(string type, JsonObject data) => new()

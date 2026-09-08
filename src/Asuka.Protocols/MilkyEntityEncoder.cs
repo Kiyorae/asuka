@@ -56,6 +56,8 @@ internal sealed class MilkyEntityEncoder(AsukaStore store)
         JsonArray segments,
         CancellationToken cancellationToken)
     {
+        if (message.Anonymous is not null)
+            throw new PlatformException(PlatformError.InvalidParameter, "Anonymous messages cannot be represented by Milky.");
         var payload = new JsonObject
         {
             ["message_scene"] = SceneName(message.Scene),
@@ -98,29 +100,44 @@ internal sealed class MilkyEntityEncoder(AsukaStore store)
     {
         ["time"] = Timestamp(request.Time),
         ["initiator_id"] = Uin(request.RequesterId),
-        ["initiator_uid"] = request.Flag,
+        ["initiator_uid"] = request.RequesterId,
         ["target_user_id"] = Uin(request.SelfId),
         ["target_user_uid"] = request.SelfId,
         ["state"] = RequestState(request),
         ["comment"] = request.Comment,
-        ["via"] = "asuka",
-        ["is_filtered"] = false,
+        ["via"] = request.Via,
+        ["is_filtered"] = request.IsFiltered,
     };
 
-    internal static JsonObject GroupNotification(PendingRequest request) => new()
+    internal static JsonObject GroupNotification(PendingRequest request)
     {
-        ["type"] = "join_request",
-        ["group_id"] = Uin(request.GroupId ?? "0"),
-        ["notification_seq"] = NotificationSequence(request),
-        ["is_filtered"] = false,
-        ["initiator_id"] = Uin(request.RequesterId),
-        ["state"] = RequestState(request),
-        ["operator_id"] = null,
-        ["comment"] = request.Comment,
-    };
+        if (request.Kind is not (RequestKind.GroupJoin or RequestKind.GroupInvitedJoin))
+            throw new ArgumentException("This request is not a group notification", nameof(request));
+        var result = new JsonObject
+        {
+            ["type"] = request.Kind == RequestKind.GroupJoin ? "join_request" : "invited_join_request",
+            ["group_id"] = Uin(request.GroupId ?? "0"),
+            ["notification_seq"] = NotificationSequence(request),
+            ["initiator_id"] = Uin(request.RequesterId),
+            ["state"] = RequestState(request),
+        };
+        if (request.ResolvedBy is { } operatorId) result["operator_id"] = Uin(operatorId);
+        if (request.Kind == RequestKind.GroupJoin)
+        {
+            result["is_filtered"] = request.IsFiltered;
+            result["comment"] = request.Comment;
+        }
+        else
+        {
+            result["target_user_id"] = Uin(request.TargetUserId
+                ?? throw new InvalidOperationException("An invited join request requires a target user"));
+        }
+        return result;
+    }
 
     internal static long NotificationSequence(PendingRequest request)
     {
+        if (request.NotificationSequence > 0) return request.NotificationSequence;
         ulong hash = 5381;
         foreach (var value in System.Text.Encoding.UTF8.GetBytes(request.Flag))
         {
@@ -128,6 +145,28 @@ internal sealed class MilkyEntityEncoder(AsukaStore store)
         }
 
         return checked((long)(hash % 9_007_199_254_740_991UL));
+    }
+
+    internal static JsonObject GroupNotification(GroupNotificationEntry notification)
+    {
+        if (notification.Request is { } request) return GroupNotification(request);
+        var data = new JsonObject
+        {
+            ["type"] = notification.Kind switch
+            {
+                GroupNotificationKind.AdminChange => "admin_change",
+                GroupNotificationKind.Kick => "kick",
+                GroupNotificationKind.Quit => "quit",
+                _ => throw new ArgumentException("The request notification has no request record.", nameof(notification)),
+            },
+            ["group_id"] = Uin(notification.GroupId),
+            ["notification_seq"] = notification.NotificationSequence,
+            ["target_user_id"] = Uin(notification.TargetUserId),
+        };
+        if (notification.Kind != GroupNotificationKind.Quit && notification.OperatorId is { } operatorId)
+            data["operator_id"] = Uin(operatorId);
+        if (notification.Kind == GroupNotificationKind.AdminChange) data["is_set"] = notification.IsSet;
+        return data;
     }
 
     internal static JsonNode Uin(string value) => JsonExtensions.NumericId(value);
@@ -147,6 +186,7 @@ internal sealed class MilkyEntityEncoder(AsukaStore store)
         null => "pending",
         RequestResolutionStatus.Accepted => "accepted",
         RequestResolutionStatus.Rejected => "rejected",
+        RequestResolutionStatus.Ignored => "ignored",
         _ => "pending",
     };
 }

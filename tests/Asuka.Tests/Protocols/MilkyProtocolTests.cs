@@ -154,6 +154,7 @@ public sealed class MilkyProtocolTests
     public async Task NotificationSequencesAreStableDistinctSafeAndExcludeInvitations()
     {
         await using var fixture = new ProtocolTestFixture();
+        await fixture.SeedGroupAsync();
         var protocol = new MilkyProtocol(ProtocolTestFixture.SelfId, fixture.Platform, fixture.Media);
         var first = new PendingRequest(
             RequestKind.GroupJoin,
@@ -184,6 +185,8 @@ public sealed class MilkyProtocolTests
             new ProtocolCall("get_group_notifications", new JsonObject { ["limit"] = 20L }));
         var repeated = await protocol.HandleAsync(
             new ProtocolCall("get_group_notifications", new JsonObject { ["limit"] = 20L }));
+        Assert.IsTrue(initial.IsSuccess, initial.Message);
+        Assert.IsTrue(repeated.IsSuccess, repeated.Message);
         var initialNotifications = (JsonArray)initial.Data!["notifications"]!;
         var repeatedNotifications = (JsonArray)repeated.Data!["notifications"]!;
         Assert.HasCount(2, initialNotifications);

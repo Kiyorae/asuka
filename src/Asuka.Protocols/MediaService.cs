@@ -2,7 +2,7 @@ using Asuka.Core;
 
 namespace Asuka.Protocols;
 
-public sealed class MediaService(AsukaStore store, AssetStore assets) : IProtocolAssetResolver
+public sealed partial class MediaService(AsukaStore store, AssetStore assets) : IProtocolAssetResolver
 {
     private string _host = "127.0.0.1";
     private ushort _port = ConnectionSettings.DefaultPort;
@@ -22,10 +22,33 @@ public sealed class MediaService(AsukaStore store, AssetStore assets) : IProtoco
 
     public Uri GetUrl(string assetId)
     {
-        return new UriBuilder(Uri.UriSchemeHttp, _host, _port, $"/assets/{Uri.EscapeDataString(assetId)}").Uri;
+        return new UriBuilder(Uri.UriSchemeHttp, _host, _port, $"/assets/{Uri.EscapeDataString(assetId)}")
+        {
+            Query = $"{AssetStore.DownloadTokenQueryParameter}={Assets.CreateAssetDownloadToken(assetId)}",
+        }.Uri;
     }
 
     public string GetPath(string assetId) => Assets.LocationOf(assetId);
+
+    public Uri GetSharedFileUrl(string fileId, string selfId) =>
+        new UriBuilder(Uri.UriSchemeHttp, _host, _port, $"/files/{Uri.EscapeDataString(fileId)}")
+        {
+            Query = $"{AssetStore.DownloadTokenQueryParameter}={Assets.CreateSharedFileDownloadToken(fileId, selfId)}",
+        }.Uri;
+
+    /// <summary>Returns a local playback source, converting legacy SILK to cached WAV when needed.</summary>
+    public async Task<string> GetPlayableAudioPathAsync(Asset asset, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+        var reference = await GetReferenceAsync(asset, preferLocalPath: true, cancellationToken).ConfigureAwait(false);
+        var resolved = reference.ResolvedAsset ?? asset;
+        var path = Assets.LocationOf(resolved.Id);
+        var header = await ReadHeaderAsync(resolved, cancellationToken).ConfigureAwait(false);
+        return SilkAudioConverter.IsSilk(header)
+            ? await SilkAudioConverter.GetWavePathAsync(
+                path, Path.Combine(Assets.DirectoryPath, ".audio-cache"), cancellationToken).ConfigureAwait(false)
+            : path;
+    }
 
     /// <summary>
     /// Reads only the leading bytes needed to inspect an asset's container metadata.

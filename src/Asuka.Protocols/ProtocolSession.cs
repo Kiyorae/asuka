@@ -6,10 +6,12 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Channels;
 using Asuka.Core;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -21,7 +23,7 @@ namespace Asuka.Protocols;
 /// Connects a protocol translator to Microsoft's native .NET networking stack.
 /// No browser engine participates in protocol handling or rendering.
 /// </summary>
-public sealed class ProtocolSession : IAsyncDisposable
+public sealed partial class ProtocolSession : IAsyncDisposable
 {
     private const long MaxPayloadBytes = 64L * 1024 * 1024;
     private readonly IProtocolImplementation _implementation;
@@ -31,6 +33,7 @@ public sealed class ProtocolSession : IAsyncDisposable
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly object _disposeSync = new();
     private readonly ConcurrentDictionary<Guid, SocketPeer> _peers = new();
+    private readonly ConcurrentDictionary<Guid, SsePeer> _ssePeers = new();
     private readonly ConcurrentDictionary<Guid, Task> _peerTasks = new();
     private readonly HttpClient _webhookClient;
     private CancellationTokenSource? _lifetime;
@@ -52,6 +55,7 @@ public sealed class ProtocolSession : IAsyncDisposable
         _platform = platform;
         _settings = settings;
         _assets = assets;
+        if (_implementation is OneBotProtocol oneBot) oneBot.ScheduledActionFailed += OnScheduledActionFailed;
         _webhookClient = new HttpClient(new SocketsHttpHandler
         {
             AllowAutoRedirect = false,
@@ -69,6 +73,10 @@ public sealed class ProtocolSession : IAsyncDisposable
     public event EventHandler<TrafficEntry>? TrafficObserved;
 
     public event EventHandler<Exception>? OutboundDeliveryFailed;
+    public event EventHandler<Exception>? DeferredActionFailed;
+
+    private void OnScheduledActionFailed(object? sender, OneBotScheduledActionFailure failure) =>
+        DeferredActionFailed?.Invoke(this, new InvalidOperationException($"Deferred action {failure.Action} failed with code {failure.RetCode}."));
 
     public SessionState State => _state;
 
@@ -80,57 +88,7 @@ public sealed class ProtocolSession : IAsyncDisposable
         await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-            if (_lifetime is not null)
-            {
-                throw new InvalidOperationException("The protocol session is already running.");
-            }
-
-            _settings.Validate();
-            if (!_implementation.SupportedTransports.Contains(_settings.Transport))
-            {
-                throw new UnsupportedTransportException(_implementation.Identifier, _settings.Transport);
-            }
-
-            _platform.SetEchoesSelfEvents(_settings.PostSelfEvents);
-            _lifetime = new CancellationTokenSource();
-            var lifetimeToken = _lifetime.Token;
-            _eventPump = PumpEventsAsync(lifetimeToken);
-
-            try
-            {
-                switch (_settings.Transport)
-                {
-                    case TransportMode.WebSocketServer:
-                        await StartServerAsync(milky: false, lifetimeToken, cancellationToken).ConfigureAwait(false);
-                        SetState(new SessionState(SessionStateKind.Listening, _settings.Port));
-                        break;
-                    case TransportMode.WebSocketClient:
-                        SetState(new SessionState(SessionStateKind.Connecting));
-                        _clientPump = RunClientLoopAsync(lifetimeToken);
-                        break;
-                    case TransportMode.MilkyService:
-                        await StartServerAsync(milky: true, lifetimeToken, cancellationToken).ConfigureAwait(false);
-                        SetRoundTripTime(new RoundTripTimeState(RoundTripTimeKind.Unsupported));
-                        SetState(new SessionState(SessionStateKind.Ready, _settings.Port));
-                        break;
-                    default:
-                        throw new InvalidOperationException($"Unsupported transport: {_settings.Transport}.");
-                }
-
-                if (_implementation.HeartbeatInterval is { } interval && interval > TimeSpan.Zero)
-                {
-                    _heartbeatPump = RunHeartbeatLoopAsync(interval, lifetimeToken);
-                }
-            }
-            catch
-            {
-                _lifetime.Cancel();
-                _lifetime.Dispose();
-                _lifetime = null;
-                SetState(new SessionState(SessionStateKind.Idle));
-                throw;
-            }
+            await StartCoreAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -138,70 +96,167 @@ public sealed class ProtocolSession : IAsyncDisposable
         }
     }
 
-    public async Task StopAsync(CancellationToken cancellationToken = default)
+    // The lifecycle gate is held by the public entry points and restart worker.
+    private async Task StartCoreAsync(CancellationToken cancellationToken)
     {
-        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (_lifetime is not null)
+        {
+            throw new InvalidOperationException("The protocol session is already running.");
+        }
+
+        _settings.Validate();
+        if (!_implementation.SupportedTransports.Contains(_settings.Transport))
+        {
+            throw new UnsupportedTransportException(_implementation.Identifier, _settings.Transport);
+        }
+
+        _platform.SetEchoesSelfEvents(_settings.PostSelfEvents);
+        if (_implementation is OneBotProtocol oneBot) oneBot.ResumeScheduledActions();
+        ConfigureOneBotHttpEvents(_settings.OneBotHttpEventsEnabled, _settings.OneBotHttpEventBufferSize);
+        _lifetime = new CancellationTokenSource();
+        var lifetimeToken = _lifetime.Token;
+        InstallRestartHandler();
+
         try
         {
-            var lifetime = _lifetime;
-            if (lifetime is null)
+            ConfigureOneBotWebhooks(lifetimeToken);
+            _eventPump = PumpEventsAsync(lifetimeToken);
+            switch (_settings.Transport)
             {
-                SetState(new SessionState(SessionStateKind.Idle));
-                return;
+                case TransportMode.WebSocketServer:
+                    await StartServerAsync(milky: false, lifetimeToken, cancellationToken).ConfigureAwait(false);
+                    SetState(new SessionState(SessionStateKind.Listening, _settings.Port));
+                    break;
+                case TransportMode.WebSocketClient:
+                    SetState(new SessionState(SessionStateKind.Connecting));
+                    _clientPump = RunClientLoopAsync(lifetimeToken);
+                    break;
+                case TransportMode.MilkyService:
+                    await StartServerAsync(milky: true, lifetimeToken, cancellationToken).ConfigureAwait(false);
+                    SetRoundTripTime(new RoundTripTimeState(RoundTripTimeKind.Unsupported));
+                    SetState(new SessionState(SessionStateKind.Ready, _settings.Port));
+                    break;
+                case TransportMode.OneBotHttpServer:
+                    await StartServerAsync(milky: false, lifetimeToken, cancellationToken).ConfigureAwait(false);
+                    SetRoundTripTime(new RoundTripTimeState(RoundTripTimeKind.Unsupported));
+                    SetState(new SessionState(SessionStateKind.Ready, _settings.Port));
+                    break;
+                default:
+                    throw new InvalidOperationException($"Unsupported transport: {_settings.Transport}.");
             }
 
-            _lifetime = null;
-            lifetime.Cancel();
-            try
-            {
-                var closeTasks = _peers.Values.Select(peer => peer.CloseAsync(CancellationToken.None));
-                await IgnoreCancellationAsync(closeTasks).ConfigureAwait(false);
-                _peers.Clear();
+            await PublishOneBotWebhookStartupAsync(lifetimeToken).ConfigureAwait(false);
 
-                if (_server is { } server)
-                {
-                    _server = null;
-                    using var stopTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                    try
-                    {
-                        await server.StopAsync(stopTimeout.Token).ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                    }
-                    finally
-                    {
-                        await server.DisposeAsync().ConfigureAwait(false);
-                    }
-                }
-
-                var pumps = new[] { _eventPump, _clientPump, _heartbeatPump }
-                    .Concat(_peerTasks.Values)
-                    .Where(static task => task is not null)
-                    .Cast<Task>()
-                    .ToArray();
-                _eventPump = null;
-                _clientPump = null;
-                _heartbeatPump = null;
-                _peerTasks.Clear();
-                await IgnoreCancellationAsync(pumps).ConfigureAwait(false);
-            }
-            finally
+            if ((_settings.Transport != TransportMode.OneBotHttpServer || _settings.OneBotWebhookUrls.Count > 0)
+                && _implementation.HeartbeatInterval is { } interval && interval > TimeSpan.Zero)
             {
-                lifetime.Dispose();
-                _server = null;
-                _eventPump = null;
-                _clientPump = null;
-                _heartbeatPump = null;
-                _peerTasks.Clear();
-                _peers.Clear();
-                SetRoundTripTime(new RoundTripTimeState(RoundTripTimeKind.Unavailable));
-                SetState(new SessionState(SessionStateKind.Idle));
+                _heartbeatPump = RunHeartbeatLoopAsync(interval, lifetimeToken);
             }
+        }
+        catch
+        {
+            _ = CancelPendingRestart();
+            await StopCoreAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Stops the owned runtime and cancels pending restarts. Cancellation is
+    /// observed before shutdown begins; once begun, cleanup runs to completion.
+    /// </summary>
+    public async Task StopAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var restart = CancelPendingRestart();
+        Task laterRestart = Task.CompletedTask;
+        await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            // A concurrent Start may have completed while Stop waited for the
+            // lifecycle gate. Invalidate that generation as well.
+            laterRestart = CancelPendingRestart();
+            await StopCoreAsync().ConfigureAwait(false);
         }
         finally
         {
             _lifecycleGate.Release();
+        }
+        await Task.WhenAll(restart, laterRestart).ConfigureAwait(false);
+    }
+
+    private async Task StopCoreAsync()
+    {
+        DetachRestartHandler();
+        var lifetime = _lifetime;
+        if (lifetime is null)
+        {
+            await StopOneBotWebhooksAsync().ConfigureAwait(false);
+            if (_implementation is OneBotProtocol oneBot)
+            {
+                await oneBot.StopScheduledActionsAsync().ConfigureAwait(false);
+                oneBot.ClearPendingFileTransfers();
+            }
+            ResetOneBotHttpEvents();
+            SetState(new SessionState(SessionStateKind.Idle));
+            return;
+        }
+
+        _lifetime = null;
+        lifetime.Cancel();
+        try
+        {
+            await StopOneBotWebhooksAsync().ConfigureAwait(false);
+            if (_implementation is OneBotProtocol stoppedOneBot)
+                await stoppedOneBot.StopScheduledActionsAsync().ConfigureAwait(false);
+            var closeTasks = _peers.Values.Select(peer => peer.CloseAsync(CancellationToken.None));
+            await IgnoreCancellationAsync(closeTasks).ConfigureAwait(false);
+            _peers.Clear();
+
+            if (_server is { } server)
+            {
+                _server = null;
+                using var stopTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                try
+                {
+                    await server.StopAsync(stopTimeout.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                finally
+                {
+                    await server.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+
+            var pumps = new[] { _eventPump, _clientPump, _heartbeatPump }
+                .Concat(_peerTasks.Values)
+                .Where(static task => task is not null)
+                .Cast<Task>()
+                .ToArray();
+            _eventPump = null;
+            _clientPump = null;
+            _heartbeatPump = null;
+            _peerTasks.Clear();
+            await IgnoreCancellationAsync(pumps).ConfigureAwait(false);
+        }
+        finally
+        {
+            lifetime.Dispose();
+            _server = null;
+            _eventPump = null;
+            _clientPump = null;
+            _heartbeatPump = null;
+            _peerTasks.Clear();
+            _peers.Clear();
+            _ssePeers.Clear();
+            if (_implementation is OneBotProtocol oneBot) oneBot.ClearPendingFileTransfers();
+            ResetOneBotHttpEvents();
+            SetRoundTripTime(new RoundTripTimeState(RoundTripTimeKind.Unavailable));
+            SetState(new SessionState(SessionStateKind.Idle));
         }
     }
 
@@ -228,7 +283,9 @@ public sealed class ProtocolSession : IAsyncDisposable
         });
         app.Run(context => milky
             ? HandleMilkyRequestAsync(context, sessionToken)
-            : HandleOneBotUpgradeAsync(context, sessionToken));
+            : _settings.Transport == TransportMode.OneBotHttpServer
+                ? HandleOneBotHttpRequestAsync(context, sessionToken)
+                : HandleOneBotUpgradeAsync(context, sessionToken));
 
         try
         {
@@ -273,7 +330,8 @@ public sealed class ProtocolSession : IAsyncDisposable
         var path = context.Request.Path.Value ?? "/";
         if (!context.WebSockets.IsWebSocketRequest && path.StartsWith("/assets/", StringComparison.Ordinal))
         {
-            if (!TokenAuthentication.IsBearerAuthorized(context.Request, _settings.AccessToken))
+            if (!TokenAuthentication.IsBearerAuthorized(context.Request, _settings.AccessToken)
+                && !IsScopedDownloadAuthorized(context.Request, path))
             {
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 return;
@@ -300,7 +358,7 @@ public sealed class ProtocolSession : IAsyncDisposable
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(sessionToken, context.RequestAborted);
         var socket = await context.WebSockets.AcceptWebSocketAsync(acceptedSubprotocol).ConfigureAwait(false);
         var peer = new SocketPeer(socket);
-        await RunBidirectionalPeerAsync(peer, linked.Token).ConfigureAwait(false);
+        await RunBidirectionalPeerAsync(peer, linked.Token, sessionToken).ConfigureAwait(false);
     }
 
     private static string? SelectServerSubprotocol(HttpRequest request)
@@ -328,7 +386,7 @@ public sealed class ProtocolSession : IAsyncDisposable
         var path = context.Request.Path.Value ?? "/";
         if (path.Equals("/event", StringComparison.Ordinal))
         {
-            await HandleMilkyEventSocketAsync(context, sessionToken).ConfigureAwait(false);
+            await HandleMilkyEventAsync(context, sessionToken).ConfigureAwait(false);
             return;
         }
 
@@ -343,7 +401,8 @@ public sealed class ProtocolSession : IAsyncDisposable
             return;
         }
 
-        if (!TokenAuthentication.IsBearerAuthorized(context.Request, _settings.AccessToken))
+        if (!TokenAuthentication.IsBearerAuthorized(context.Request, _settings.AccessToken)
+            && !IsScopedDownloadAuthorized(context.Request, path))
         {
             await WriteMilkyFailureAsync(
                 context,
@@ -357,6 +416,12 @@ public sealed class ProtocolSession : IAsyncDisposable
         if (path.StartsWith("/assets/", StringComparison.Ordinal))
         {
             await HandleAssetRequestAsync(context, path[8..], sessionToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (path.StartsWith("/files/", StringComparison.Ordinal))
+        {
+            await HandleSharedFileRequestAsync(context, path[7..], sessionToken).ConfigureAwait(false);
             return;
         }
 
@@ -429,7 +494,7 @@ public sealed class ProtocolSession : IAsyncDisposable
         await context.Response.WriteAsync(envelope.ToCompactJson(), context.RequestAborted).ConfigureAwait(false);
     }
 
-    private async Task HandleMilkyEventSocketAsync(HttpContext context, CancellationToken sessionToken)
+    private async Task HandleMilkyEventAsync(HttpContext context, CancellationToken sessionToken)
     {
         if (!HttpMethods.IsGet(context.Request.Method))
         {
@@ -455,12 +520,19 @@ public sealed class ProtocolSession : IAsyncDisposable
 
         if (!context.WebSockets.IsWebSocketRequest)
         {
-            await WriteMilkyFailureAsync(
-                context,
-                -400,
-                "/event requires a WebSocket upgrade",
-                StatusCodes.Status426UpgradeRequired,
-                sessionToken).ConfigureAwait(false);
+            if (context.Request.Headers.Upgrade
+                .SelectMany(static value => (value ?? string.Empty).Split(','))
+                .Any(static value => value.Trim().Equals("websocket", StringComparison.OrdinalIgnoreCase)))
+            {
+                await WriteMilkyFailureAsync(
+                    context,
+                    -400,
+                    "Invalid WebSocket upgrade request",
+                    StatusCodes.Status400BadRequest,
+                    sessionToken).ConfigureAwait(false);
+                return;
+            }
+            await HandleMilkyEventStreamAsync(context, sessionToken).ConfigureAwait(false);
             return;
         }
 
@@ -479,23 +551,106 @@ public sealed class ProtocolSession : IAsyncDisposable
         }
     }
 
+    private async Task HandleMilkyEventStreamAsync(HttpContext context, CancellationToken sessionToken)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(sessionToken, context.RequestAborted);
+        using var peer = new SsePeer(linked.Token);
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType = "text/event-stream; charset=utf-8";
+        context.Response.Headers.CacheControl = "no-cache";
+        context.Response.Headers["X-Accel-Buffering"] = "no";
+        context.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+        // Register before flushing headers so a client can immediately trigger an event
+        // after observing HTTP 200 without missing its first delivery.
+        _ssePeers[peer.Id] = peer;
+        try
+        {
+            await context.Response.StartAsync(linked.Token).ConfigureAwait(false);
+            await context.Response.Body.FlushAsync(linked.Token).ConfigureAwait(false);
+            await peer.WriteAsync(context.Response.Body).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (linked.IsCancellationRequested || peer.IsStopped)
+        {
+        }
+        catch (IOException) when (linked.IsCancellationRequested || peer.IsStopped)
+        {
+        }
+        catch (Exception error)
+        {
+            OutboundDeliveryFailed?.Invoke(this, error);
+        }
+        finally
+        {
+            _ssePeers.TryRemove(peer.Id, out _);
+            if (peer.BacklogExceeded)
+            {
+                OutboundDeliveryFailed?.Invoke(this, new IOException(
+                    "A Milky SSE client could not keep up with event delivery and was disconnected."));
+            }
+        }
+    }
+
+    private bool IsScopedDownloadAuthorized(HttpRequest request, string path)
+    {
+        if (_assets is null || !HttpMethods.IsGet(request.Method)
+            || !request.Query.TryGetValue(AssetStore.DownloadTokenQueryParameter, out var grants)
+            || grants.Count != 1) return false;
+        return path.StartsWith("/assets/", StringComparison.Ordinal)
+            ? _assets.ValidateAssetDownloadToken(path[8..], grants[0])
+            : path.StartsWith("/files/", StringComparison.Ordinal)
+                && _assets.ValidateSharedFileDownloadToken(path[7..], _implementation.SelfId, grants[0]);
+    }
+
     private async Task HandleAssetRequestAsync(HttpContext context, string assetId, CancellationToken cancellationToken)
     {
-        if (!HttpMethods.IsGet(context.Request.Method) || _assets is null || string.IsNullOrWhiteSpace(assetId))
+        if (!HttpMethods.IsGet(context.Request.Method) || _assets is null || !_assets.Exists(assetId))
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
             return;
         }
 
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, context.RequestAborted);
         try
         {
-            var bytes = await _assets.GetBytesAsync(assetId, cancellationToken).ConfigureAwait(false);
+            await using var stream = await _assets.OpenReadAsync(assetId, linked.Token).ConfigureAwait(false);
             context.Response.StatusCode = StatusCodes.Status200OK;
             context.Response.ContentType = "application/octet-stream";
-            context.Response.ContentLength = bytes.Length;
-            await context.Response.Body.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+            context.Response.ContentLength = stream.Length;
+            await stream.CopyToAsync(context.Response.Body, 64 * 1024, linked.Token).ConfigureAwait(false);
         }
-        catch (FileNotFoundException)
+        catch (Exception error) when (!context.Response.HasStarted && error is FileNotFoundException or DirectoryNotFoundException or ArgumentException)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+        }
+    }
+
+    private async Task HandleSharedFileRequestAsync(HttpContext context, string fileId, CancellationToken sessionToken)
+    {
+        if (!HttpMethods.IsGet(context.Request.Method) || _assets is null || string.IsNullOrWhiteSpace(fileId))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(sessionToken, context.RequestAborted);
+        try
+        {
+            var file = await _platform.GetSharedFileForDownloadAsync(fileId, _implementation.SelfId, cancellation.Token)
+                .ConfigureAwait(false);
+            await using var stream = await _assets.OpenReadAsync(file.Asset.Id, cancellation.Token).ConfigureAwait(false);
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            context.Response.ContentType = "application/octet-stream";
+            context.Response.ContentLength = stream.Length;
+            await stream.CopyToAsync(context.Response.Body, 64 * 1024, cancellation.Token).ConfigureAwait(false);
+            await context.Response.Body.FlushAsync(cancellation.Token).ConfigureAwait(false);
+            if (file.GroupId is { } groupId)
+            {
+                await _platform.RecordGroupFileDownloadAsync(groupId, file.Id, file.Asset.Id, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (Exception error) when (!context.Response.HasStarted
+            && error is PlatformException or FileNotFoundException or DirectoryNotFoundException or ArgumentException)
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
         }
@@ -554,7 +709,7 @@ public sealed class ProtocolSession : IAsyncDisposable
                     _settings.BuildWebSocketUri(_implementation.ClientHandshake.DefaultPath),
                     cancellationToken).ConfigureAwait(false);
                 var peer = new SocketPeer(socket, ownsSocket: false);
-                await RunBidirectionalPeerAsync(peer, cancellationToken).ConfigureAwait(false);
+                await RunBidirectionalPeerAsync(peer, cancellationToken, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -607,7 +762,7 @@ public sealed class ProtocolSession : IAsyncDisposable
         options.KeepAliveTimeout = TimeSpan.FromSeconds(20);
     }
 
-    private async Task RunBidirectionalPeerAsync(SocketPeer peer, CancellationToken cancellationToken)
+    private async Task RunBidirectionalPeerAsync(SocketPeer peer, CancellationToken cancellationToken, CancellationToken sessionToken)
     {
         var handshakeFrames = await _implementation.GetHandshakeFramesAsync(cancellationToken).ConfigureAwait(false);
         foreach (var frame in handshakeFrames)
@@ -628,7 +783,7 @@ public sealed class ProtocolSession : IAsyncDisposable
                     break;
                 }
 
-                await HandleOneBotFrameAsync(peer, text, cancellationToken).ConfigureAwait(false);
+                await HandleOneBotFrameAsync(peer, text, cancellationToken, sessionToken).ConfigureAwait(false);
             }
         }
         finally
@@ -657,8 +812,14 @@ public sealed class ProtocolSession : IAsyncDisposable
     private async Task HandleOneBotFrameAsync(
         SocketPeer peer,
         string text,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CancellationToken sessionToken)
     {
+        if (_implementation is OneBotProtocol { Version: OneBotVersion.V12 })
+        {
+            await HandleOneBotV12FrameAsync(peer, text, cancellationToken).ConfigureAwait(false);
+            return;
+        }
         JsonObject payload;
         try
         {
@@ -682,9 +843,30 @@ public sealed class ProtocolSession : IAsyncDisposable
             ?? new JsonObject();
         var echo = payload["echo"]?.DeepClone();
         ObserveTraffic(new TrafficEntry(TrafficDirection.InboundCall, action, payload));
+        cancellationToken.ThrowIfCancellationRequested();
+        var actionToken = _implementation is OneBotProtocol { Version: OneBotVersion.V11 }
+            && IsV11DeferredAction(action) ? sessionToken : cancellationToken;
+        using var restartResponse = (_implementation as OneBotProtocol)?.BeginRestartResponse();
         var reply = await _implementation.HandleAsync(
             new ProtocolCall(action, (JsonObject)parameters.DeepClone(), echo),
-            cancellationToken).ConfigureAwait(false);
+            actionToken).ConfigureAwait(false);
+        var envelope = _implementation.CreateEnvelope(reply, echo);
+        ObserveTraffic(new TrafficEntry(TrafficDirection.Reply, $"{action} → {reply.RetCode}", envelope));
+        await SendJsonAsync(peer, envelope, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleOneBotV12FrameAsync(SocketPeer peer, string text, CancellationToken cancellationToken)
+    {
+        JsonNode? parsed;
+        try { parsed = JsonNode.Parse(text); }
+        catch (JsonException) { parsed = null; }
+        var failure = OneBotV12ActionRequest.Validate(parsed, out var call);
+        var payload = parsed as JsonObject;
+        var echo = call?.Echo ?? (payload is null ? null : ParseV12Echo(payload));
+        var action = call?.Name ?? "Invalid action request";
+        ObserveTraffic(new TrafficEntry(TrafficDirection.InboundCall, action, call is null ? new JsonObject() : payload!));
+        var reply = failure ?? ValidateV12Self(payload!)
+            ?? await _implementation.HandleAsync(call!, cancellationToken).ConfigureAwait(false);
         var envelope = _implementation.CreateEnvelope(reply, echo);
         ObserveTraffic(new TrafficEntry(TrafficDirection.Reply, $"{action} → {reply.RetCode}", envelope));
         await SendJsonAsync(peer, envelope, cancellationToken).ConfigureAwait(false);
@@ -712,6 +894,10 @@ public sealed class ProtocolSession : IAsyncDisposable
                 }
                 foreach (var frame in frames)
                 {
+                    if (_settings.Transport == TransportMode.OneBotHttpServer)
+                        BufferOneBotHttpEvent(frame);
+                    BufferOneBotWebhookEvent(frame);
+
                     ObserveTraffic(new TrafficEntry(
                         TrafficDirection.OutboundEvent,
                         Summarize(frame),
@@ -723,6 +909,19 @@ public sealed class ProtocolSession : IAsyncDisposable
 
                     if (_settings.Transport == TransportMode.MilkyService)
                     {
+                        if (!_ssePeers.IsEmpty)
+                        {
+                            // Compact JSON escapes embedded newlines, preserving the SSE
+                            // record boundary and the protocol's fixed event name.
+                            var eventBytes = Encoding.UTF8.GetBytes($"event: milky_event\ndata: {frame.Payload.ToCompactJson()}\n\n");
+                            foreach (var peer in _ssePeers.Values)
+                            {
+                                if (!peer.TryEnqueue(eventBytes))
+                                {
+                                    _ssePeers.TryRemove(peer.Id, out _);
+                                }
+                            }
+                        }
                         var deliveries = _settings.GetWebhookEndpoints().Select(
                             endpoint => PostWebhookAsync(endpoint, frame, cancellationToken));
                         await Task.WhenAll(deliveries).ConfigureAwait(false);
@@ -748,7 +947,13 @@ public sealed class ProtocolSession : IAsyncDisposable
                     continue;
                 }
 
-                var sends = _peers.Values.Select(peer => SendAsync(peer, frame, observe: true, cancellationToken));
+                var hasWebhooks = _implementation is OneBotProtocol && _settings.OneBotWebhookUrls.Count > 0;
+                if (hasWebhooks)
+                {
+                    BufferOneBotWebhookEvent(frame);
+                    ObserveTraffic(new TrafficEntry(TrafficDirection.OutboundEvent, Summarize(frame), frame.Payload));
+                }
+                var sends = _peers.Values.Select(peer => SendAsync(peer, frame, observe: !hasWebhooks, cancellationToken));
                 await Task.WhenAll(sends).ConfigureAwait(false);
             }
         }
@@ -866,7 +1071,7 @@ public sealed class ProtocolSession : IAsyncDisposable
         RoundTripTimeChanged?.Invoke(this, value);
     }
 
-    private void ObserveTraffic(TrafficEntry entry) => TrafficObserved?.Invoke(this, entry);
+    private void ObserveTraffic(TrafficEntry entry) => TrafficObserved?.Invoke(this, ProtocolTrafficRedaction.Redact(entry));
 
     private void RefreshSocketState()
     {
@@ -911,7 +1116,124 @@ public sealed class ProtocolSession : IAsyncDisposable
     {
         Interlocked.Exchange(ref _disposed, 1);
         await StopAsync(CancellationToken.None).ConfigureAwait(false);
+        if (_implementation is OneBotProtocol oneBot) oneBot.ScheduledActionFailed -= OnScheduledActionFailed;
+        if (_implementation is IDisposable disposable) disposable.Dispose();
         _webhookClient.Dispose();
+    }
+
+    private sealed class SsePeer : IDisposable
+    {
+        private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(20);
+        private static readonly byte[] KeepAlive = ": keep-alive\n\n"u8.ToArray();
+        private readonly Channel<byte[]> _pending = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(64)
+        {
+            SingleReader = true,
+            SingleWriter = true,
+            FullMode = BoundedChannelFullMode.Wait,
+            AllowSynchronousContinuations = false,
+        });
+        private readonly CancellationTokenSource _lifetime;
+        private readonly CancellationToken _token;
+        private readonly object _sync = new();
+        private long _pendingBytes;
+
+        internal SsePeer(CancellationToken cancellationToken)
+        {
+            _lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _token = _lifetime.Token;
+        }
+
+        internal Guid Id { get; } = Guid.NewGuid();
+
+        internal bool IsStopped => _token.IsCancellationRequested;
+
+        internal bool BacklogExceeded { get; private set; }
+
+        internal bool TryEnqueue(byte[] bytes)
+        {
+            lock (_sync)
+            {
+                if (IsStopped)
+                {
+                    return false;
+                }
+                // Bound both item count and bytes; a stalled client must not retain an
+                // unbounded event history or stall other subscribers and WebHooks.
+                if (Interlocked.Add(ref _pendingBytes, bytes.Length) <= MaxPayloadBytes
+                    && _pending.Writer.TryWrite(bytes))
+                {
+                    return true;
+                }
+
+                Interlocked.Add(ref _pendingBytes, -bytes.Length);
+                BacklogExceeded = true;
+                _pending.Writer.TryComplete();
+                _lifetime.Cancel();
+                return false;
+            }
+        }
+
+        internal async Task WriteAsync(Stream output)
+        {
+            var token = _token;
+            using var timer = new PeriodicTimer(KeepAliveInterval);
+            var nextEvent = _pending.Reader.WaitToReadAsync(token).AsTask();
+            var nextKeepAlive = timer.WaitForNextTickAsync(token).AsTask();
+            try
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    await Task.WhenAny(nextEvent, nextKeepAlive).ConfigureAwait(false);
+                    if (nextEvent.IsCompleted)
+                    {
+                        if (!await nextEvent.ConfigureAwait(false))
+                        {
+                            return;
+                        }
+                        while (_pending.Reader.TryRead(out var bytes))
+                        {
+                            try
+                            {
+                                await output.WriteAsync(bytes, token).ConfigureAwait(false);
+                                await output.FlushAsync(token).ConfigureAwait(false);
+                            }
+                            finally
+                            {
+                                Interlocked.Add(ref _pendingBytes, -bytes.Length);
+                            }
+                        }
+                        nextEvent = _pending.Reader.WaitToReadAsync(token).AsTask();
+                    }
+                    if (nextKeepAlive.IsCompleted)
+                    {
+                        if (!await nextKeepAlive.ConfigureAwait(false))
+                        {
+                            return;
+                        }
+                        // Milky defines no heartbeat event. SSE comments keep an idle
+                        // connection alive without inventing an Event payload.
+                        await output.WriteAsync(KeepAlive, token).ConfigureAwait(false);
+                        await output.FlushAsync(token).ConfigureAwait(false);
+                        nextKeepAlive = timer.WaitForNextTickAsync(token).AsTask();
+                    }
+                }
+            }
+            finally
+            {
+                _lifetime.Cancel();
+                await IgnoreCancellationAsync([nextEvent, nextKeepAlive]).ConfigureAwait(false);
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_sync)
+            {
+                _pending.Writer.TryComplete();
+                _lifetime.Cancel();
+                _lifetime.Dispose();
+            }
+        }
     }
 
     private sealed class SocketPeer(WebSocket socket, bool ownsSocket = true) : IAsyncDisposable

@@ -15,8 +15,16 @@ internal sealed class MilkyEventEncoder(
     {
         var time = domainEvent.Time.ToUnixTimeSeconds();
         JsonObject? payload;
+        // Milky has no anonymous identity contract. A protocol switch must not
+        // turn a stored anonymous event into a real-account message or recall.
+        if (domainEvent.Payload is MessageEvent { Message.Anonymous: not null }
+            or MessageRecalledEvent { Detail.Anonymous: not null }) return [];
         switch (domainEvent.Payload)
         {
+            case BotPresenceChangedEvent changed:
+                payload = changed.Presence.IsOnline ? null
+                    : Envelope(time, "bot_offline", new JsonObject { ["reason"] = changed.Presence.Reason });
+                break;
             case MessageEvent messageEvent:
                 {
                     var encoded = await segments.EncodeIncomingAsync(
@@ -36,7 +44,7 @@ internal sealed class MilkyEventEncoder(
                     var message = await store.GetMessageAsync(
                         recalled.Detail.MessageId,
                         cancellationToken).ConfigureAwait(false);
-                    payload = message is null
+                    payload = message is null || message.Anonymous is not null
                         ? null
                         : Envelope(time, "message_recall", new JsonObject
                         {
@@ -51,6 +59,13 @@ internal sealed class MilkyEventEncoder(
                         });
                     break;
                 }
+            case GroupDisbandedEvent disbanded:
+                payload = Envelope(time, "group_disband", new JsonObject
+                {
+                    ["group_id"] = Uin(disbanded.GroupId),
+                    ["operator_id"] = Uin(disbanded.OperatorId),
+                });
+                break;
             case GroupMemberAddedEvent added:
                 {
                     var data = new JsonObject
@@ -58,11 +73,15 @@ internal sealed class MilkyEventEncoder(
                         ["group_id"] = Uin(added.Change.GroupId),
                         ["user_id"] = Uin(added.Change.UserId),
                     };
-                    if (added.Change.Reason == GroupMemberChangeReason.Invited)
+                    if (added.Change.InviterId is { } inviterId)
+                    {
+                        data["invitor_id"] = Uin(inviterId);
+                    }
+                    else if (added.Change.Reason == GroupMemberChangeReason.Invited)
                     {
                         data["invitor_id"] = Uin(added.Change.OperatorId);
                     }
-                    else if (added.Change.Reason == GroupMemberChangeReason.Administrative)
+                    if (added.Change.Reason == GroupMemberChangeReason.Administrative)
                     {
                         data["operator_id"] = Uin(added.Change.OperatorId);
                     }
@@ -123,7 +142,11 @@ internal sealed class MilkyEventEncoder(
                 payload = null;
                 break;
             case RequestReceivedEvent request:
-                payload = EncodeRequest(request.Request, time);
+                var currentRequest = request.Request.NotificationSequence == 0
+                    ? await store.GetRequestAsync(request.Request.Id, cancellationToken).ConfigureAwait(false)
+                        ?? request.Request
+                    : request.Request;
+                payload = EncodeRequest(currentRequest, time);
                 break;
             case PokeEvent poke when poke.Poke.Scene == ChatScene.Group:
                 payload = Envelope(time, "group_nudge", new JsonObject
@@ -160,7 +183,7 @@ internal sealed class MilkyEventEncoder(
                             ["user_id"] = Uin(reaction.Reaction.UserId),
                             ["message_seq"] = message.Seq,
                             ["face_id"] = reaction.Reaction.Reaction,
-                            ["reaction_type"] = "face",
+                            ["reaction_type"] = reaction.Reaction.ReactionType,
                             ["is_add"] = reaction.Reaction.Added,
                         });
                     break;
@@ -173,9 +196,37 @@ internal sealed class MilkyEventEncoder(
                 {
                     ["group_id"] = Uin(file.Upload.GroupId),
                     ["user_id"] = Uin(file.Upload.UserId),
-                    ["file_id"] = file.Upload.Asset.Id,
-                    ["file_name"] = file.Upload.Asset.Name,
+                    ["file_id"] = file.Upload.FileId ?? file.Upload.Asset.Id,
+                    ["file_name"] = file.Upload.FileName ?? file.Upload.Asset.Name,
                     ["file_size"] = file.Upload.Asset.ByteCount,
+                });
+                break;
+            case FriendFileUploadedEvent file:
+                payload = Envelope(time, "friend_file_upload", new JsonObject
+                {
+                    ["user_id"] = Uin(file.Upload.UserId),
+                    ["is_self"] = file.Upload.SenderId == selfId,
+                    ["file_id"] = file.Upload.File.Id,
+                    ["file_name"] = file.Upload.File.Name,
+                    ["file_size"] = file.Upload.File.Asset.ByteCount,
+                    ["file_hash"] = file.Upload.File.FileHash,
+                });
+                break;
+            case PeerPinChangedEvent pin:
+                payload = Envelope(time, "peer_pin_change", new JsonObject
+                {
+                    ["message_scene"] = pin.Scene.ToString().ToLowerInvariant(),
+                    ["peer_id"] = Uin(pin.PeerId),
+                    ["is_pinned"] = pin.IsPinned,
+                });
+                break;
+            case GroupEssenceMessageChangedEvent essence:
+                payload = Envelope(time, "group_essence_message_change", new JsonObject
+                {
+                    ["group_id"] = Uin(essence.GroupId),
+                    ["message_seq"] = essence.MessageSequence,
+                    ["operator_id"] = Uin(essence.OperatorId),
+                    ["is_set"] = essence.IsSet,
                 });
                 break;
             case ConnectedEvent:
@@ -202,26 +253,41 @@ internal sealed class MilkyEventEncoder(
             RequestKind.Friend => Envelope(time, "friend_request", new JsonObject
             {
                 ["initiator_id"] = Uin(request.RequesterId),
-                ["initiator_uid"] = request.Flag,
+                ["initiator_uid"] = request.RequesterId,
                 ["comment"] = request.Comment,
-                ["via"] = "asuka",
+                ["via"] = request.Via,
             }),
             RequestKind.GroupJoin => Envelope(time, "group_join_request", new JsonObject
             {
                 ["group_id"] = Uin(request.GroupId ?? "0"),
                 ["notification_seq"] = MilkyEntityEncoder.NotificationSequence(request),
-                ["is_filtered"] = false,
+                ["is_filtered"] = request.IsFiltered,
                 ["initiator_id"] = Uin(request.RequesterId),
                 ["comment"] = request.Comment,
             }),
-            RequestKind.GroupInvite => Envelope(time, "group_invitation", new JsonObject
+            RequestKind.GroupInvite => EncodeGroupInvitation(request, time),
+            RequestKind.GroupInvitedJoin => Envelope(time, "group_invited_join_request", new JsonObject
             {
                 ["group_id"] = Uin(request.GroupId ?? "0"),
-                ["invitation_seq"] = MilkyEntityEncoder.NotificationSequence(request),
+                ["notification_seq"] = MilkyEntityEncoder.NotificationSequence(request),
                 ["initiator_id"] = Uin(request.RequesterId),
+                ["target_user_id"] = Uin(request.TargetUserId
+                    ?? throw new InvalidOperationException("An invited join request requires a target user")),
             }),
             _ => throw new ArgumentOutOfRangeException(nameof(request)),
         };
+    }
+
+    private JsonObject EncodeGroupInvitation(PendingRequest request, long time)
+    {
+        var data = new JsonObject
+        {
+            ["group_id"] = Uin(request.GroupId ?? "0"),
+            ["invitation_seq"] = MilkyEntityEncoder.NotificationSequence(request),
+            ["initiator_id"] = Uin(request.RequesterId),
+        };
+        if (request.SourceGroupId is { } sourceGroupId) data["source_group_id"] = Uin(sourceGroupId);
+        return Envelope(time, "group_invitation", data);
     }
 
     private JsonObject Envelope(long time, string eventType, JsonObject data) => new()

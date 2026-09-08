@@ -5,7 +5,7 @@ using Asuka.Core;
 
 namespace Asuka.Protocols;
 
-public sealed class MilkyProtocol : IProtocolImplementation
+public sealed partial class MilkyProtocol : IProtocolImplementation
 {
     private const string CurrentVersion = "0.1.0.1";
     private static readonly FrozenSet<string> ApiNames = new[]
@@ -13,6 +13,7 @@ public sealed class MilkyProtocol : IProtocolImplementation
         "get_login_info", "get_impl_info", "get_user_profile", "get_friend_list", "get_friend_info",
         "get_group_list", "get_group_info", "get_group_member_list", "get_group_member_info",
         "get_cookies", "get_csrf_token",
+        "get_peer_pins", "set_peer_pin", "set_avatar", "set_nickname", "set_bio", "get_custom_face_url_list",
         "send_private_message", "send_group_message", "recall_private_message", "recall_group_message",
         "get_message", "get_history_messages", "get_resource_temp_url", "get_forwarded_messages",
         "mark_message_as_read", "send_friend_nudge", "send_profile_like", "delete_friend",
@@ -21,6 +22,11 @@ public sealed class MilkyProtocol : IProtocolImplementation
         "set_group_member_mute", "set_group_whole_mute", "kick_group_member", "quit_group",
         "send_group_nudge", "send_group_message_reaction", "get_group_notifications",
         "accept_group_request", "reject_group_request", "accept_group_invitation", "reject_group_invitation",
+        "upload_private_file", "upload_group_file", "get_private_file_download_url", "get_group_file_download_url",
+        "get_group_files", "move_group_file", "rename_group_file", "delete_group_file", "persist_group_file",
+        "create_group_folder", "rename_group_folder", "delete_group_folder",
+        "set_group_avatar", "get_group_announcements", "send_group_announcement", "delete_group_announcement",
+        "get_group_essence_messages", "set_group_essence_message",
     }.ToFrozenSet(StringComparer.Ordinal);
 
     private readonly PlatformService _platform;
@@ -66,8 +72,10 @@ public sealed class MilkyProtocol : IProtocolImplementation
                 HttpStatus: 404);
         }
 
+        if (OfflineFailure(request.Name) is { } offline) return offline;
         try
         {
+            using var botAction = RequiresOnlineAccount(request.Name) ? _platform.BeginBotAction(SelfId) : null;
             return request.Name switch
             {
                 "get_login_info" => await LoginInfoAsync(cancellationToken).ConfigureAwait(false),
@@ -79,8 +87,7 @@ public sealed class MilkyProtocol : IProtocolImplementation
                 "get_group_info" => await GroupInfoAsync(request, cancellationToken).ConfigureAwait(false),
                 "get_group_member_list" => await GroupMemberListAsync(request, cancellationToken).ConfigureAwait(false),
                 "get_group_member_info" => await GroupMemberInfoAsync(request, cancellationToken).ConfigureAwait(false),
-                "get_cookies" => ProtocolReply.Success(new JsonObject { ["cookies"] = string.Empty }),
-                "get_csrf_token" => ProtocolReply.Success(new JsonObject { ["csrf_token"] = string.Empty }),
+                "get_cookies" or "get_csrf_token" => await CredentialApiAsync(request, cancellationToken).ConfigureAwait(false),
                 "send_private_message" => await SendMessageAsync(request, ChatScene.Friend, cancellationToken).ConfigureAwait(false),
                 "send_group_message" => await SendMessageAsync(request, ChatScene.Group, cancellationToken).ConfigureAwait(false),
                 "recall_private_message" => await RecallMessageAsync(request, ChatScene.Friend, cancellationToken).ConfigureAwait(false),
@@ -89,7 +96,14 @@ public sealed class MilkyProtocol : IProtocolImplementation
                 "get_history_messages" => await HistoryAsync(request, cancellationToken).ConfigureAwait(false),
                 "get_resource_temp_url" => await ResourceUrlAsync(request, cancellationToken).ConfigureAwait(false),
                 "get_forwarded_messages" => await ForwardedMessagesAsync(request, cancellationToken).ConfigureAwait(false),
-                "mark_message_as_read" or "send_profile_like" => ProtocolReply.Success(),
+                "get_peer_pins" => await PeerPinsAsync(cancellationToken).ConfigureAwait(false),
+                "set_peer_pin" => await SetPeerPinAsync(request, cancellationToken).ConfigureAwait(false),
+                "mark_message_as_read" => await MarkMessageAsReadAsync(request, cancellationToken).ConfigureAwait(false),
+                "send_profile_like" => await SendProfileLikeAsync(request, cancellationToken).ConfigureAwait(false),
+                "set_avatar" => await SetAvatarAsync(request, cancellationToken).ConfigureAwait(false),
+                "set_nickname" => await SetNicknameAsync(request, cancellationToken).ConfigureAwait(false),
+                "set_bio" => await SetBioAsync(request, cancellationToken).ConfigureAwait(false),
+                "get_custom_face_url_list" => await CustomFaceUrlsAsync(cancellationToken).ConfigureAwait(false),
                 "send_friend_nudge" => await FriendNudgeAsync(request, cancellationToken).ConfigureAwait(false),
                 "delete_friend" => await DeleteFriendAsync(request, cancellationToken).ConfigureAwait(false),
                 "get_friend_requests" => await FriendRequestsAsync(request, cancellationToken).ConfigureAwait(false),
@@ -106,15 +120,26 @@ public sealed class MilkyProtocol : IProtocolImplementation
                 "send_group_nudge" => await GroupNudgeAsync(request, cancellationToken).ConfigureAwait(false),
                 "send_group_message_reaction" => await GroupReactionAsync(request, cancellationToken).ConfigureAwait(false),
                 "get_group_notifications" => await GroupNotificationsAsync(request, cancellationToken).ConfigureAwait(false),
+                "set_group_avatar" => await SetGroupAvatarAsync(request, cancellationToken).ConfigureAwait(false),
+                "get_group_announcements" => await GetGroupAnnouncementsAsync(request, cancellationToken).ConfigureAwait(false),
+                "send_group_announcement" => await SendGroupAnnouncementAsync(request, cancellationToken).ConfigureAwait(false),
+                "delete_group_announcement" => await DeleteGroupAnnouncementAsync(request, cancellationToken).ConfigureAwait(false),
+                "get_group_essence_messages" => await GetGroupEssenceMessagesAsync(request, cancellationToken).ConfigureAwait(false),
+                "set_group_essence_message" => await SetGroupEssenceMessageAsync(request, cancellationToken).ConfigureAwait(false),
                 "accept_group_request" => await ResolveGroupRequestAsync(request, RequestKind.GroupJoin, true, cancellationToken).ConfigureAwait(false),
                 "reject_group_request" => await ResolveGroupRequestAsync(request, RequestKind.GroupJoin, false, cancellationToken).ConfigureAwait(false),
                 "accept_group_invitation" => await ResolveGroupRequestAsync(request, RequestKind.GroupInvite, true, cancellationToken).ConfigureAwait(false),
                 "reject_group_invitation" => await ResolveGroupRequestAsync(request, RequestKind.GroupInvite, false, cancellationToken).ConfigureAwait(false),
+                "upload_private_file" or "upload_group_file" or "get_private_file_download_url" or "get_group_file_download_url"
+                    or "get_group_files" or "move_group_file" or "rename_group_file" or "delete_group_file" or "persist_group_file"
+                    or "create_group_folder" or "rename_group_folder" or "delete_group_folder"
+                    => await FileApiAsync(request, cancellationToken).ConfigureAwait(false),
                 _ => new ProtocolReply(-404, Message: $"Requested API does not exist: {request.Name}", HttpStatus: 404),
             };
         }
         catch (PlatformException error)
         {
+            if (OfflineFailure(request.Name) is { } offlineReply) return offlineReply;
             return new ProtocolReply(error.Error == PlatformError.InvalidParameter ? -400 : -404, Message: error.Message);
         }
         catch (ArgumentException error)
@@ -377,6 +402,13 @@ public sealed class MilkyProtocol : IProtocolImplementation
         var message = await _store.GetMessageAsync(scene, peerId, sequence, SelfId, cancellationToken)
             .ConfigureAwait(false)
             ?? throw Missing(PlatformError.MessageNotFound, $"Message not found: {scene}:{peerId}:{sequence}", peerId);
+        if (message.Anonymous is not null)
+            throw Missing(PlatformError.MessageNotFound, "Anonymous messages are unavailable in this protocol", peerId);
+        if (message.IsRecalled)
+        {
+            throw Missing(PlatformError.MessageNotFound, $"Message has been recalled: {sequence}", peerId);
+        }
+
         var encoded = await _segments.EncodeIncomingAsync(message.Content, cancellationToken).ConfigureAwait(false);
         return ProtocolReply.Success(new JsonObject
         {
@@ -401,7 +433,7 @@ public sealed class MilkyProtocol : IProtocolImplementation
             limit,
             cancellationToken).ConfigureAwait(false);
         var result = new JsonArray();
-        foreach (var message in history)
+        foreach (var message in history.Where(static message => !message.IsRecalled && message.Anonymous is null))
         {
             var encoded = await _segments.EncodeIncomingAsync(message.Content, cancellationToken).ConfigureAwait(false);
             result.Add(await _entities.IncomingMessageAsync(message, encoded, cancellationToken).ConfigureAwait(false));
@@ -443,11 +475,12 @@ public sealed class MilkyProtocol : IProtocolImplementation
         foreach (var node in nodes)
         {
             var stored = await _store.GetMessageAsync(node.Id, cancellationToken).ConfigureAwait(false);
-            var sender = await _store.GetUserAsync(node.SenderId, cancellationToken).ConfigureAwait(false);
+            var sender = stored?.Anonymous is null
+                ? await _store.GetUserAsync(node.SenderId, cancellationToken).ConfigureAwait(false) : null;
             result.Add(new JsonObject
             {
                 ["message_seq"] = stored?.SelfId == SelfId ? stored.Seq : 0,
-                ["sender_name"] = node.SenderName,
+                ["sender_name"] = stored?.Anonymous?.Name ?? node.SenderName,
                 ["avatar_url"] = HttpAvatar(sender?.Avatar),
                 ["time"] = node.Time.ToUnixTimeSeconds(),
                 ["segments"] = await _segments.EncodeIncomingAsync(node.Content, cancellationToken).ConfigureAwait(false),
@@ -488,11 +521,13 @@ public sealed class MilkyProtocol : IProtocolImplementation
 
     private async Task<ProtocolReply> FriendRequestsAsync(ProtocolCall request, CancellationToken cancellationToken)
     {
-        var limit = Math.Max(request.GetInteger("limit") ?? 20, 1);
-        var pending = await _store.GetPendingRequestsAsync(SelfId, RequestKind.Friend, cancellationToken)
+        var limit = request.GetInteger("limit") ?? 20;
+        if (limit <= 0) return Invalid("limit must be positive");
+        var filtered = request.GetBoolean("is_filtered") ?? false;
+        var history = await _store.GetFriendRequestHistoryAsync(SelfId, filtered, limit, cancellationToken)
             .ConfigureAwait(false);
         var result = new JsonArray();
-        foreach (var item in pending.Take(limit))
+        foreach (var item in history)
         {
             result.Add(MilkyEntityEncoder.FriendRequest(item));
         }
@@ -505,17 +540,28 @@ public sealed class MilkyProtocol : IProtocolImplementation
         bool approve,
         CancellationToken cancellationToken)
     {
-        var flag = request.GetText("initiator_uid");
-        if (flag is null)
+        var initiatorUid = request.GetText("initiator_uid");
+        if (string.IsNullOrWhiteSpace(initiatorUid))
         {
             return Invalid("Missing initiator_uid");
         }
 
+        var filtered = request.GetBoolean("is_filtered") ?? false;
+        var requests = await _store.GetPendingRequestsAsync(SelfId, RequestKind.Friend, cancellationToken)
+            .ConfigureAwait(false);
+        var pending = requests.FirstOrDefault(item => item.RequesterId == initiatorUid && item.IsFiltered == filtered);
+        if (pending is null)
+        {
+            throw Missing(PlatformError.RequestNotFound, $"Friend request not found: {initiatorUid}", initiatorUid);
+        }
+
         await _platform.ResolveRequestAsync(
-            flag,
+            pending.Flag,
             approve,
             request.GetText("reason") ?? string.Empty,
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            cancellationToken: cancellationToken,
+            expectedSelfId: SelfId,
+            expectedRequestId: pending.Id).ConfigureAwait(false);
         return ProtocolReply.Success();
     }
 
@@ -661,6 +707,12 @@ public sealed class MilkyProtocol : IProtocolImplementation
             return Invalid("Missing group_id, message_seq, or reaction");
         }
 
+        var reactionType = request.GetText("reaction_type") ?? "face";
+        if (reactionType is not ("face" or "emoji") || string.IsNullOrWhiteSpace(reaction))
+        {
+            return Invalid("reaction must be nonempty and reaction_type must be face or emoji");
+        }
+
         var message = await _store.GetMessageAsync(
             ChatScene.Group,
             groupId,
@@ -673,6 +725,7 @@ public sealed class MilkyProtocol : IProtocolImplementation
             SelfId,
             reaction,
             request.GetBoolean("is_add") ?? true,
+            reactionType,
             cancellationToken).ConfigureAwait(false);
         return ProtocolReply.Success();
     }
@@ -681,31 +734,22 @@ public sealed class MilkyProtocol : IProtocolImplementation
         ProtocolCall request,
         CancellationToken cancellationToken)
     {
-        var limit = Math.Max(request.GetInteger("limit") ?? 20, 1);
-        var pending = request.GetBoolean("is_filtered") == true
-            ? []
-            : await _store.GetPendingRequestsAsync(SelfId, RequestKind.GroupJoin, cancellationToken)
-                .ConfigureAwait(false);
-        var numbered = pending
-            .Select(item => (Request: item, Sequence: MilkyEntityEncoder.NotificationSequence(item)))
-            .OrderByDescending(static item => item.Sequence);
-        if (request.GetLong("start_notification_seq") is { } start)
-        {
-            numbered = numbered.Where(item => item.Sequence <= start).OrderByDescending(static item => item.Sequence);
-        }
-
-        var materialized = numbered.ToArray();
-        var page = materialized.Take(limit).ToArray();
+        var limit = request.GetInteger("limit") ?? 20;
+        if (limit <= 0) return Invalid("limit must be positive");
+        var filtered = request.GetBoolean("is_filtered") ?? false;
+        var page = await _platform.GetGroupNotificationsAsync(SelfId, filtered,
+            request.GetLong("start_notification_seq"), limit, cancellationToken)
+            .ConfigureAwait(false);
         var result = new JsonArray();
-        foreach (var item in page)
+        foreach (var item in page.Notifications)
         {
-            result.Add(MilkyEntityEncoder.GroupNotification(item.Request));
+            result.Add(MilkyEntityEncoder.GroupNotification(item));
         }
 
         var data = new JsonObject { ["notifications"] = result };
-        if (materialized.Length > page.Length && page.LastOrDefault().Sequence is var next && next > 0)
+        if (page.NextSequence is { } next)
         {
-            data["next_notification_seq"] = next - 1;
+            data["next_notification_seq"] = next;
         }
 
         return ProtocolReply.Success(data);
@@ -723,16 +767,22 @@ public sealed class MilkyProtocol : IProtocolImplementation
             return Invalid($"Missing {sequenceKey} or group_id");
         }
 
-        if (kind == RequestKind.GroupJoin
-            && (request.GetText("notification_type") != "join_request"
-                || request.GetBoolean("is_filtered") == true))
+        if (kind == RequestKind.GroupJoin)
         {
-            return Invalid("Only unfiltered join_request notifications are supported");
+            kind = request.GetText("notification_type") switch
+            {
+                "join_request" => RequestKind.GroupJoin,
+                "invited_join_request" => RequestKind.GroupInvitedJoin,
+                _ => (RequestKind)(-1),
+            };
+            if (!Enum.IsDefined(kind)) return Invalid("Unknown notification_type");
         }
 
+        var filtered = kind != RequestKind.GroupInvite && (request.GetBoolean("is_filtered") ?? false);
         var pending = await _store.GetPendingRequestsAsync(SelfId, kind, cancellationToken).ConfigureAwait(false);
         var match = pending.FirstOrDefault(item =>
-            item.GroupId == groupId && MilkyEntityEncoder.NotificationSequence(item) == sequence);
+            item.GroupId == groupId && item.IsFiltered == filtered
+                && MilkyEntityEncoder.NotificationSequence(item) == sequence);
         if (match is null)
         {
             throw Missing(
@@ -745,7 +795,9 @@ public sealed class MilkyProtocol : IProtocolImplementation
             match.Flag,
             approve,
             request.GetText("reason") ?? string.Empty,
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            cancellationToken: cancellationToken,
+            expectedSelfId: SelfId,
+            expectedRequestId: match.Id).ConfigureAwait(false);
         return ProtocolReply.Success();
     }
 
