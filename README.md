@@ -1,119 +1,144 @@
 # Asuka for Windows
 
-> [!WARNING]
-> Asuka is under active development. The current implementation covers only a subset of the intended functionality and must not be treated as a complete or normative description of the capabilities or behavior of OneBot, Milky, or any related protocol.
+Asuka is a local QQ platform simulator and debugger for bot frameworks. Connect a bot framework to its protocol endpoint, create simulated users and groups, send messages as different identities, and inspect the resulting events and API responses. No real QQ account is required.
 
-Asuka is a local simulator for the QQ platform and a debugger for bot frameworks. A bot framework connects to Asuka as if it were a real protocol endpoint. From the desktop interface, you can create users and groups, send messages as any identity, handle friend and group-join requests, and inspect the events and responses received by the framework. All simulated state remains on the local machine; no real QQ account is required.
+The desktop client is built with WinUI 3, .NET 10, and Windows App SDK 2.4 for **Windows 11 24H2 (build 26100) or later**. It is inspired by [A-kirami's Matcha](https://github.com/A-kirami/matcha).
 
-This project draws its inspiration and original design from [A-kirami's original project](https://github.com/A-kirami/matcha). This Windows implementation targets Windows 11 24H2 (build 26100) or later and uses .NET 10, Windows App SDK 2.4, WinUI 3, and full-trust MSIX packaging.
+> [!NOTE]
+> Asuka is under active development. Protocol support is incomplete; use the [capability matrix and known limits](docs/PROTOCOL_COVERAGE.md) when choosing a test scenario. The official protocol specifications remain authoritative.
 
-## Native implementation
+## Download a development build
 
-- The interface uses WinUI 3/XAML, native window APIs, Mica, Windows pickers, the clipboard, and drag-and-drop support.
-- The MSIX system splash screen is followed by an extended WinUI splash experience. Its artwork and the application icons are derived from `Assets/Akame.png`.
-- The HTTP service uses in-process ASP.NET Core Kestrel, WebSocket support uses `System.Net.WebSockets`, and persistence uses `Microsoft.Data.Sqlite`.
-- Messages, rich content, media, settings, logs, and protocol diagnostics do not use WebView, WebView2, Blazor, HTML, JavaScript, Electron, or another browser engine.
-- The quality script rejects forbidden browser-engine references in application source.
+Open [GitHub Actions](https://github.com/Kiyorae/asuka/actions), select a successful **CI** run for the commit you intend to test, and download the matching artifact:
 
-## Supported protocols
+| Device | Artifact |
+| --- | --- |
+| Intel/AMD x64 | `Asuka-windows-x64-unsigned-dev-<run_number>` |
+| Windows on ARM64 | `Asuka-windows-arm64-unsigned-dev-<run_number>` |
 
-| Protocol | Asuka role | Endpoint |
-| --- | --- | --- |
-| OneBot V11 | Forward WebSocket server | The bot framework connects to Asuka's configured `host:port` |
-| OneBot V11 | Reverse WebSocket client | Connects to `/onebot/v11/ws` by default |
-| OneBot V12 | Forward WebSocket server | The bot framework connects to Asuka's configured `host:port` |
-| OneBot V12 | Reverse WebSocket client | Connects to `/onebot/v12/ws` by default with subprotocol `12.asuka` |
-| Milky 1.3 | HTTP and WebSocket service | `POST /api/<action>`, `GET /event`, and optional WebHooks |
+Artifacts are retained for 14 days. These are **unsigned development packages**, not signed production releases. They use a dedicated Windows AllowUnsigned development identity.
 
-The default listener is `127.0.0.1:5700`. On first launch, Asuka generates a 256-bit access token and stores it in Windows Password Vault. Server modes require authentication even on loopback. Protocol endpoints serve native bot clients only and reject requests containing a browser `Origin` header.
-
-Built-in listeners and reverse WebSocket connections currently use clear-text `http/ws`, so non-loopback addresses fail closed by default. Non-loopback WebHooks must use HTTPS. The explicit unsafe override exists only for isolated test networks and is never enabled automatically by the normal interface.
-
-Milky endpoints:
-
-```text
-API:        http://127.0.0.1:5700/api/get_login_info
-Event WS:   ws://127.0.0.1:5700/event
-Asset:      http://127.0.0.1:5700/assets/<sha256>
-```
-
-## Architecture
-
-```text
-Asuka.App (WinUI 3)
-    |
-    +-- AppEnvironment / native windows and dialogs
-    |
-    v
-Asuka.Core
-    PlatformService ---> DomainEvent
-         |                  |
-         v                  v
-    AsukaStore       Asuka.Protocols
-    AssetStore        OneBot / Milky translators
-                            |
-                            v
-                     ProtocolSession
-                     Kestrel / WebSocket / WebHook
-```
-
-Every state change passes through `PlatformService`. Operations originating from WinUI controls and protocol actions share the same permission checks, SQLite writes, and `DomainEvent` publication flow. Protocol adapters translate wire formats but never modify the database directly.
-
-## Requirements
-
-- Windows 11 24H2 (build 26100) or later
-- .NET SDK 10.0.400 (`global.json` permits later SDKs in the same feature band)
-- Visual Studio 2026, or a command-line environment with the .NET SDK and Windows SDK 10.0.26100
-
-## Build and test
+1. Extract the entire artifact ZIP into one folder. It contains the MSIX, `install-unsigned.ps1`, `README-Windows.txt`, `LICENSE`, and `SHA256SUMS.txt`.
+2. Read `README-Windows.txt` and follow its checksum check for all four payload files. Compare the MSIX hash with the selected CI run's summary, which also records the source commit. Checksums detect changed bytes; trust still comes from selecting the intended repository, workflow run, and commit.
+3. From the extracted folder, verify the package using its expected MSIX hash. The x64 example is:
 
 ```powershell
-dotnet restore Asuka.slnx
-dotnet build Asuka.slnx -p:Platform=x64
-dotnet test tests/Asuka.Tests/Asuka.Tests.csproj -p:Platform=x64
+Get-Content .\SHA256SUMS.txt
+Get-FileHash .\Asuka-windows-x64-unsigned-dev.msix -Algorithm SHA256
+
+$expectedHash = '<MSIX SHA-256 from the selected CI run summary>'
+.\install-unsigned.ps1 -Package .\Asuka-windows-x64-unsigned-dev.msix -ExpectedSha256 $expectedHash -VerifyOnly
 ```
 
-Run all repository checks, including the ARM64 build, with:
+4. Open **Administrator PowerShell**, return to that folder, set the same `$expectedHash`, and install:
+
+```powershell
+.\install-unsigned.ps1 -Package .\Asuka-windows-x64-unsigned-dev.msix -ExpectedSha256 $expectedHash
+```
+
+For ARM64, use `Asuka-windows-arm64-unsigned-dev.msix`. Follow the bundled instructions if downloaded scripts are blocked. The installer checks the hash, architecture, minimum Windows version, and dedicated unsigned manifest identity. It does not request elevation, trust a certificate, change execution policy, or remove an installed newer version. See [SECURITY.md](SECURITY.md).
+
+## Connect a bot framework
+
+Choose the protocol and transport in Settings, copy the generated access token, and start the service. The default listener is `127.0.0.1:5700`.
+
+| Protocol | Available transports |
+| --- | --- |
+| OneBot V11 | Forward/reverse WebSocket; HTTP actions at `GET /<action>` or `POST /<action>`; optional HTTP POST event receivers |
+| OneBot V12 | Forward/reverse WebSocket; `POST /` JSON actions and `get_latest_events` polling; optional WebHook receivers |
+| Milky 1.3 | `POST /api/<action>`; WebSocket or SSE at `GET /event`; optional WebHook receivers |
+
+Reverse WebSocket defaults are `/onebot/v11/ws` and `/onebot/v12/ws`; V12 uses subprotocol `12.asuka`. OneBot HTTP and WebSocket are separate session modes.
+
+Server modes require authentication by default, including on loopback. OneBot action routes accept Bearer authentication or the standard `access_token` query parameter. Milky APIs require Bearer authentication; `/event` also accepts the query token. Protocol endpoints reject browser `Origin` headers. Non-loopback HTTP/WS connections are disabled by default; use trusted TLS termination or a tunnel for remote setups.
+
+The [coverage document](docs/PROTOCOL_COVERAGE.md) describes scheduling, heartbeats, polling, WebHook quick operations, response formats, and implementation limits.
+
+## Client features
+
+Controls follow the selected protocol. Features absent from that protocol are hidden; actions requiring additional permissions are disabled.
+
+- Private and group messages with recall, separate reply cards, and jumps to loaded originals.
+- Native text/code, image/GIF, voice, video, and protocol-appropriate file, location, face, and forward rendering.
+- Milky group reactions, favorites, pins, read markers, profile editing, shared files/folders, announcements, essence messages, and group notification history.
+- V11/Milky request simulation and processing, profile likes, member moderation, and group administration.
+- V11 group upload/poke notices, honors/lucky-king simulation, and anonymous messages with alias moderation.
+- Runtime bot online/offline simulation, V11 service restart/cache cleanup, and explicit V11/Milky simulator cookie/CSRF responses.
+- Protocol activity inspection, native settings, and component license links in About.
+
+QQ SILK voice is converted to WAV by the bundled decoder. A system ffmpeg installation is unnecessary. ARM64 packages currently run the x64 decoder through Windows emulation; see [the decoder sources and license](native/Asuka.SilkDecoder/README.md).
+
+Voice and video include play/pause, time displays, mute, and a seek bar when the source supports seeking. Video Fit/Fill controls change scaling; expanded playback stays in the window and exits with its button or Esc. Outgoing messages use white text on blue, with a darker background separating quoted content.
+
+The loading overlay follows initialization and the Windows animation preference. In About, clicking the logo five times starts a 2500 ms rotation with spring scaling.
+
+## Try the showcase
+
+In **Settings → Demo**, enable **Demo mode** and choose **Save and restart**. Disable it and save to return to ordinary conversations. Switching workspaces clears unsent drafts.
+
+The isolated showcase alternates messages between a fixed group and private chat in a 48-step loop, every three seconds by default. It includes the logo PNG, spinning-logo GIF, SILK/WAV voice, H.264 video, code blocks, replies, recalls, and protocol-specific content. Use Group/Private, Pause, and Follow new messages to control it. Each chat keeps at most 120 messages before resetting.
+
+For scripted launches:
+
+```powershell
+./scripts/run-demo.ps1
+./scripts/run-demo.ps1 -Protocol OneBot12 -IntervalSeconds 5
+```
+
+Equivalent executable arguments are `--demo --demo-protocol=milky --demo-interval=3`. Protocol choices are `milky`, `onebot11`, and `onebot12`; cadence is 1–30 seconds. Explicit `--demo`/`--no-demo` overrides the saved setting, which takes precedence over `ASUKA_DEMO`. Demo mode does not start protocol networking or use ordinary settings and credentials. [Showcase asset details](src/Asuka.App/Assets/Showcase/README.md).
+
+## Build from source
+
+Development requires Windows 11 24H2+, the .NET SDK selected by [global.json](global.json), Windows SDK 10.0.26100, and Visual Studio C++ build tools for the bundled SILK helper. Visual Studio 2026 provides the native debugging workflow. Packages are self-contained; end users do not need the development SDKs.
+
+```powershell
+dotnet restore Asuka.slnx -p:Platform=x64
+dotnet build Asuka.slnx --configuration Release --no-restore -p:Platform=x64
+dotnet test tests/Asuka.Tests/Asuka.Tests.csproj --configuration Release --no-restore -p:Platform=x64
+```
+
+Run the repository checks, including formatting, the browser-engine source guard, and ARM64 compilation:
 
 ```powershell
 ./scripts/check.ps1
 ```
 
-In Visual Studio, use the `Asuka (Package)` profile for MSIX deployment or `Asuka (Unpackaged)` for faster source debugging.
+In Visual Studio, select `Asuka.App` and `Debug | x64`. Use **Asuka (Package)** for MSIX deployment, **Asuka (Unpackaged)** for source debugging, or **Asuka (Demo)** for the showcase. Press F5 and enable XAML Hot Reload/XAML Diagnostics in the debugger options. Debug builds also accept an absolute `ASUKA_DEV_DATA_ROOT` for isolated data.
 
-## Packaging
-
-Create a self-contained MSIX verification package:
-
-```powershell
-./scripts/package.ps1 -Platform x64 -Configuration Release -PackageVersion 0.1.0.1
-```
-
-Create and verify an unsigned Windows 11 preview package:
+To create the dedicated unsigned development package:
 
 ```powershell
 ./scripts/package.ps1 -Platform x64 -Configuration Release -PackageVersion 0.1.0.1 -UnsignedInstallable
-./scripts/install-unsigned.ps1 -Package '<exact .msix path>' -ExpectedSha256 '<SHA-256 printed by package.ps1>' -VerifyOnly
+./scripts/install-unsigned.ps1 -Package '<exact output .msix path>' -ExpectedSha256 '<printed SHA-256>' -VerifyOnly
 ```
 
-Create a GitHub Release-style archive:
+Use `-Platform ARM64` for ARM64. [package-release.ps1](scripts/package-release.ps1) additionally creates a release ZIP with checksums and installation instructions.
 
-```powershell
-./scripts/package-release.ps1 -Platform x64 -Configuration Release -Version 0.1.0.1 -OutputDirectory ./dist
+The latest recorded regression baseline is **726 passed, zero failed, and one non-Windows-only case excluded on Windows**. This covers protocol/model/filesystem behavior, not complete conformance or a native UI acceptance test. See [verification scope](docs/PROTOCOL_COVERAGE.md#verification).
+
+## Architecture and local data
+
+```text
+WinUI client / AppEnvironment
+            |
+      PlatformService ---- DomainEvent ---- Protocol adapters
+            |                                    |
+        AsukaStore                         ProtocolSession
+        AssetStore                     Kestrel / WS / WebHook
 ```
 
-Unsigned packages are development artifacts for trusted testing only. See [`scripts/release/README-Windows.txt`](scripts/release/README-Windows.txt) for installation steps and [`SECURITY.md`](SECURITY.md) for the security model.
+`PlatformService` owns simulated actions, permission checks, and domain events. SQLite stores platform state; content-addressed files store attachments. Protocol adapters translate between this model and official wire formats.
 
-Use `ARM64` instead of `x64` for the `-Platform` argument when targeting ARM64.
+All application rendering is native WinUI/XAML. The app does not host a browser engine. The Windows App SDK's transitive WebView2 payload is attributed in About but is not instantiated.
 
-## Local data
+- Packaged installations use package-managed `LocalState` and `LocalCache`.
+- Unpackaged launches use `%LOCALAPPDATA%\Asuka\Data` and `%LOCALAPPDATA%\Asuka\Cache\assets`.
+- Demo data lives separately under `%LOCALAPPDATA%\Asuka\Showcase\<Protocol>`.
+- Initial package startup can migrate existing unpackaged data by online SQLite backup and integrity checking, without overwriting an existing destination or deleting the source.
+- Access tokens and WebHook signing secrets use Windows Password Vault. Simulator credentials stay in memory unless explicitly remembered in Credential Locker; neither is stored in plain-text settings or SQLite.
 
-- MSIX deployments store settings and SQLite data in package-managed `LocalState`, with content-addressed attachments in `LocalCache`.
-- Unpackaged debugging uses `%LOCALAPPDATA%\Asuka\Data\asuka.sqlite3`, `%LOCALAPPDATA%\Asuka\Cache\assets\<sha256>`, and `settings.json`.
-- The access token is stored in Windows Password Vault and is never written to the plain-text settings file.
-
-Remote attachments are streamed with a 64 MiB limit. Automatic redirects, system proxies, and cookies are disabled. Connections are pinned to a validated public IP; loopback, private, link-local, and reserved addresses are rejected. Protocol media cannot read local absolute paths, `file:` URIs, or UNC paths.
+Read [SECURITY.md](SECURITY.md) for media-download restrictions, local-file boundaries, diagnostics, and unsigned-package installation.
 
 ## License
 
-This project is released under the GNU Affero General Public License version 3 or later (SPDX: `AGPL-3.0-or-later`). See [`LICENSE`](LICENSE) for the complete terms. Asuka is an independent native implementation for Windows.
+Asuka is licensed under the **GNU Affero General Public License version 3 or later**, SPDX `AGPL-3.0-or-later`. See [LICENSE](LICENSE). Third-party components retain their own licenses; the About page and [bundled SILK documentation](native/Asuka.SilkDecoder/README.md) provide their notices and sources.
