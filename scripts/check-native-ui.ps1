@@ -6,9 +6,24 @@ param(
 $ErrorActionPreference = 'Stop'
 Push-Location (Resolve-Path -LiteralPath $RepositoryRoot).Path
 try {
-    $browserReferences = & rg -n --glob '*.cs' --glob '*.xaml' --glob '*.csproj' --glob '!**/obj/**' --glob '!**/bin/**' '(WebView2?|BlazorWebView|CefSharp|Electron)' src
-    $searchExitCode = $LASTEXITCODE
-    if ($searchExitCode -notin 0, 1) { throw 'Unable to audit browser-engine references.' }
+    $pattern = '(WebView2?|BlazorWebView|CefSharp|Electron)'
+    $ripgrep = Get-Command -Name rg -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $ripgrep) {
+        $browserReferences = & $ripgrep.Source -n --glob '*.cs' --glob '*.xaml' --glob '*.csproj' --glob '!**/obj/**' --glob '!**/bin/**' $pattern src
+        $searchExitCode = $LASTEXITCODE
+        if ($searchExitCode -notin 0, 1) { throw 'Unable to audit browser-engine references.' }
+    } else {
+        # Hosted Windows images do not guarantee ripgrep. Keep the same narrow
+        # source scan and attribution allowlist with built-in PowerShell tools.
+        $root = (Get-Location).Path
+        $browserReferences = @(Get-ChildItem -LiteralPath src -Recurse -File |
+            Where-Object { $_.Extension -in @('.cs', '.xaml', '.csproj') -and $_.FullName -notmatch '[\\/](bin|obj)[\\/]' } |
+            ForEach-Object {
+                $relative = $_.FullName.Substring($root.Length).TrimStart([char[]]@('/', '\'))
+                Select-String -LiteralPath $_.FullName -Pattern $pattern -CaseSensitive |
+                    ForEach-Object { '{0}:{1}:{2}' -f $relative, $_.LineNumber, $_.Line }
+            })
+    }
 
     # These complete license-attribution lines do not host a browser. All other
     # matches, including additional code in ComponentLicenses.cs, are forbidden.
