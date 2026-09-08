@@ -15,6 +15,8 @@ public enum PlatformError
     NotPermitted,
     InvalidParameter,
     AlreadyExists,
+    FileNotFound,
+    FolderNotFound,
 }
 
 public sealed class PlatformException : Exception
@@ -32,7 +34,7 @@ public sealed class PlatformException : Exception
     public DateTimeOffset? MutedUntil { get; init; }
 }
 
-public sealed class PlatformService : IAsyncDisposable
+public sealed partial class PlatformService : IAsyncDisposable
 {
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
     private readonly object _stateSync = new();
@@ -131,7 +133,8 @@ public sealed class PlatformService : IAsyncDisposable
         lock (_stateSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            _registeredBots.Add(id);
+            if (_registeredBots.Add(id))
+                _botPresence[id] = new BotPresence(id, true, string.Empty, DateTimeOffset.UtcNow);
         }
     }
 
@@ -140,6 +143,7 @@ public sealed class PlatformService : IAsyncDisposable
         lock (_stateSync)
         {
             _registeredBots.Remove(id);
+            _botPresence.Remove(id);
         }
     }
 
@@ -148,10 +152,13 @@ public sealed class PlatformService : IAsyncDisposable
         lock (_stateSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            var existing = id is null ? null : _botPresence.GetValueOrDefault(id);
             _registeredBots.Clear();
+            _botPresence.Clear();
             if (!string.IsNullOrWhiteSpace(id))
             {
                 _registeredBots.Add(id);
+                _botPresence[id] = existing ?? new BotPresence(id, true, string.Empty, DateTimeOffset.UtcNow);
             }
         }
     }
@@ -160,7 +167,11 @@ public sealed class PlatformService : IAsyncDisposable
         MutateAsync(token => Store.SaveAsync(user, token), cancellationToken);
 
     public Task DeleteUserAsync(string id, CancellationToken cancellationToken = default) =>
-        MutateAsync(token => Store.DeleteUserAsync(id, token), cancellationToken);
+        MutateAsync(async token =>
+        {
+            await Store.DeleteUserAsync(id, token).ConfigureAwait(false);
+            _accountCredentials.Remove(id);
+        }, cancellationToken);
 
     public Task SaveGroupAsync(Group group, CancellationToken cancellationToken = default) =>
         MutateAsync(token => Store.SaveAsync(group, token), cancellationToken);
@@ -191,13 +202,9 @@ public sealed class PlatformService : IAsyncDisposable
         MutateAsync(
             async token =>
             {
-                var actor = await Store.GetMemberAsync(id, operatorId, token).ConfigureAwait(false);
-                if (actor?.Role != GroupRole.Owner)
-                {
-                    throw NotPermitted("Only the group owner can delete the group");
-                }
-
-                await Store.DeleteGroupAsync(id, token).ConfigureAwait(false);
+                var recipients = await Store.DisbandGroupAsync(id, operatorId, RegisteredBotIds(), token).ConfigureAwait(false);
+                foreach (var selfId in recipients)
+                    Publish(new DomainEvent(selfId, new GroupDisbandedEvent(id, operatorId)), operatorId);
             },
             cancellationToken);
 
@@ -212,16 +219,26 @@ public sealed class PlatformService : IAsyncDisposable
             async token =>
             {
                 await ValidateCanSendAsync(scene, peerId, senderId, selfId, token).ConfigureAwait(false);
+                var segments = content.ToArray();
+                foreach (var reply in segments.OfType<ReplySegment>())
+                {
+                    var target = await Store.GetMessageAsync(reply.MessageId, token).ConfigureAwait(false);
+                    if (target is null || target.IsRecalled || target.Scene != scene
+                        || target.PeerId != peerId || target.SelfId != selfId)
+                    {
+                        throw InvalidParameter("A reply must reference an active message in this conversation");
+                    }
+                }
                 var message = new Message(
                     scene,
                     peerId,
                     senderId,
                     selfId,
-                    content,
+                    segments,
                     senderId == selfId ? MessageDirection.Incoming : MessageDirection.Outgoing);
-                var stored = await Store.AppendMessageAsync(message, token).ConfigureAwait(false);
+                var stored = await Store.AppendLiveMessageAsync(message, token).ConfigureAwait(false);
 
-                if (scene == ChatScene.Group
+                if (scene == ChatScene.Group && stored.Anonymous is null
                     && await Store.GetMemberAsync(peerId, senderId, CancellationToken.None).ConfigureAwait(false) is { } member)
                 {
                     await Store.SaveAsync(member with { LastSentAt = stored.Time }, CancellationToken.None)
@@ -243,8 +260,18 @@ public sealed class PlatformService : IAsyncDisposable
                 var existing = await Store.GetMessageAsync(id, token).ConfigureAwait(false)
                     ?? throw MessageNotFound(id);
                 await ValidateCanRecallAsync(existing, operatorId, token).ConfigureAwait(false);
-                var recalled = await Store.RecallMessageAsync(id, operatorId, token).ConfigureAwait(false)
-                    ?? throw MessageNotFound(id);
+                if (existing.IsRecalled)
+                {
+                    return existing;
+                }
+
+                var result = await Store.RecallMessageWithResultAsync(id, operatorId, token).ConfigureAwait(false);
+                var recalled = result.Message ?? throw MessageNotFound(id);
+                if (!result.Changed)
+                {
+                    return recalled;
+                }
+
                 Publish(
                     new DomainEvent(
                         recalled.SelfId,
@@ -253,8 +280,14 @@ public sealed class PlatformService : IAsyncDisposable
                             recalled.Scene,
                             recalled.PeerId,
                             recalled.SenderId,
-                            operatorId))),
+                            operatorId,
+                            recalled.Anonymous))),
                     operatorId);
+                if (result.EssenceRemoved)
+                {
+                    Publish(new DomainEvent(recalled.SelfId, new GroupEssenceMessageChangedEvent(
+                        recalled.PeerId, recalled.Seq, operatorId, false)), operatorId);
+                }
                 return recalled;
             },
             cancellationToken);
@@ -297,13 +330,14 @@ public sealed class PlatformService : IAsyncDisposable
                         .ConfigureAwait(false);
                 }
 
-                token.ThrowIfCancellationRequested();
+                if (!await Store.RemoveMemberWithNotificationsAsync(groupId, userId, operatorId, reason,
+                    RegisteredBotIds(), token).ConfigureAwait(false)) return;
+                var effectiveReason = operatorId == userId ? GroupMemberChangeReason.Voluntary : GroupMemberChangeReason.Administrative;
                 await PublishToGroupBotsAsync(
                     groupId,
-                    new GroupMemberRemovedEvent(new GroupMemberChange(groupId, userId, operatorId, reason)),
+                    new GroupMemberRemovedEvent(new GroupMemberChange(groupId, userId, operatorId, effectiveReason)),
                     operatorId,
                     CancellationToken.None).ConfigureAwait(false);
-                await Store.RemoveMemberAsync(groupId, userId, CancellationToken.None).ConfigureAwait(false);
             },
             cancellationToken);
 
@@ -316,21 +350,8 @@ public sealed class PlatformService : IAsyncDisposable
         MutateAsync(
             async token =>
             {
-                var member = await Store.GetMemberAsync(groupId, userId, token).ConfigureAwait(false)
-                    ?? throw NotAMember(groupId, userId);
-                var actor = await Store.GetMemberAsync(groupId, operatorId, token).ConfigureAwait(false);
-                if (actor?.Role != GroupRole.Owner)
-                {
-                    throw NotPermitted("Only the group owner can manage administrators");
-                }
-
-                if (member.Role == GroupRole.Owner)
-                {
-                    throw NotPermitted("The group owner's role cannot be changed");
-                }
-
-                await Store.SaveAsync(member with { Role = granted ? GroupRole.Admin : GroupRole.Member }, token)
-                    .ConfigureAwait(false);
+                if (!await Store.SetAdminWithNotificationsAsync(groupId, userId, operatorId, granted,
+                    RegisteredBotIds(), token).ConfigureAwait(false)) return;
                 await PublishToGroupBotsAsync(
                     groupId,
                     new GroupAdminChangedEvent(new GroupAdminChange(groupId, userId, operatorId, granted)),
@@ -542,11 +563,30 @@ public sealed class PlatformService : IAsyncDisposable
         string reaction,
         bool added,
         CancellationToken cancellationToken = default) =>
+        ReactAsync(messageId, userId, reaction, added, "face", cancellationToken);
+
+    public Task ReactAsync(
+        string messageId,
+        string userId,
+        string reaction,
+        bool added,
+        string reactionType,
+        CancellationToken cancellationToken = default) =>
         MutateAsync(
             async token =>
             {
+                if (string.IsNullOrWhiteSpace(reaction) || string.IsNullOrWhiteSpace(reactionType))
+                {
+                    throw InvalidParameter("Reaction ID and type cannot be empty");
+                }
+
                 var message = await Store.GetMessageAsync(messageId, token).ConfigureAwait(false)
                     ?? throw MessageNotFound(messageId);
+                if (message.IsRecalled)
+                {
+                    throw NotPermitted("Cannot react to a recalled message");
+                }
+
                 if (message.Scene == ChatScene.Group)
                 {
                     _ = await Store.GetMemberAsync(message.PeerId, userId, token).ConfigureAwait(false)
@@ -555,6 +595,19 @@ public sealed class PlatformService : IAsyncDisposable
                 else if (userId != message.SelfId && userId != message.PeerId)
                 {
                     throw NotPermitted("A private message reaction must come from a conversation participant");
+                }
+
+                _ = await Store.GetUserAsync(userId, token).ConfigureAwait(false)
+                    ?? throw UserNotFound(userId);
+                if (!await Store.SetMessageReactionAsync(
+                    messageId, userId, reaction, added, reactionType, token).ConfigureAwait(false))
+                {
+                    var current = await Store.GetMessageAsync(messageId, token).ConfigureAwait(false);
+                    if (current is null || current.IsRecalled)
+                    {
+                        throw NotPermitted("Cannot react to a recalled or removed message");
+                    }
+                    return;
                 }
 
                 Publish(
@@ -566,7 +619,8 @@ public sealed class PlatformService : IAsyncDisposable
                             message.PeerId,
                             userId,
                             reaction,
-                            added))),
+                            added,
+                            reactionType))),
                     userId);
             },
             cancellationToken);
@@ -575,6 +629,8 @@ public sealed class PlatformService : IAsyncDisposable
         string requesterId,
         string targetId,
         string comment = "",
+        bool isFiltered = false,
+        string via = "asuka",
         CancellationToken cancellationToken = default) =>
         MutateAsync(
             async token =>
@@ -583,13 +639,19 @@ public sealed class PlatformService : IAsyncDisposable
                     ?? throw UserNotFound(requesterId);
                 _ = await Store.GetUserAsync(targetId, token).ConfigureAwait(false)
                     ?? throw UserNotFound(targetId);
+                if (requesterId == targetId)
+                {
+                    throw InvalidParameter("A user cannot send a friend request to themselves");
+                }
+
                 if (await Store.GetFriendshipAsync(targetId, requesterId, token).ConfigureAwait(false) is not null)
                 {
                     throw AlreadyExists("The users are already friends");
                 }
 
-                var request = new PendingRequest(RequestKind.Friend, requesterId, targetId, comment: comment);
-                await Store.SaveAsync(request, token).ConfigureAwait(false);
+                var request = new PendingRequest(RequestKind.Friend, requesterId, targetId, comment: comment,
+                    isFiltered: isFiltered, via: via);
+                request = await Store.CreateFriendRequestAsync(request, token).ConfigureAwait(false);
                 Publish(new DomainEvent(targetId, new RequestReceivedEvent(request)), requesterId);
                 return request;
             },
@@ -600,6 +662,7 @@ public sealed class PlatformService : IAsyncDisposable
         string requesterId,
         string targetBotId,
         string comment = "",
+        bool isFiltered = false,
         CancellationToken cancellationToken = default) =>
         MutateAsync(
             async token =>
@@ -610,8 +673,7 @@ public sealed class PlatformService : IAsyncDisposable
                     ?? throw UserNotFound(requesterId);
                 _ = await Store.GetUserAsync(targetBotId, token).ConfigureAwait(false)
                     ?? throw UserNotFound(targetBotId);
-                _ = await Store.GetMemberAsync(groupId, targetBotId, token).ConfigureAwait(false)
-                    ?? throw NotAMember(groupId, targetBotId);
+                await RequireRequestModeratorAsync(groupId, targetBotId, token).ConfigureAwait(false);
                 if (await Store.GetMemberAsync(groupId, requesterId, token).ConfigureAwait(false) is not null)
                 {
                     throw AlreadyExists("The user is already in the group");
@@ -622,8 +684,10 @@ public sealed class PlatformService : IAsyncDisposable
                     requesterId,
                     targetBotId,
                     groupId,
-                    comment);
+                    comment,
+                    isFiltered: isFiltered);
                 await Store.SaveAsync(request, token).ConfigureAwait(false);
+                request = (await Store.GetRequestAsync(request.Id, CancellationToken.None).ConfigureAwait(false))!;
                 Publish(new DomainEvent(targetBotId, new RequestReceivedEvent(request)), requesterId);
                 return request;
             },
@@ -634,6 +698,7 @@ public sealed class PlatformService : IAsyncDisposable
         string inviterId,
         string inviteeId,
         string comment = "",
+        string? sourceGroupId = null,
         CancellationToken cancellationToken = default) =>
         MutateAsync(
             async token =>
@@ -651,13 +716,25 @@ public sealed class PlatformService : IAsyncDisposable
                     throw AlreadyExists("The invitee is already in the group");
                 }
 
+                if (sourceGroupId is not null)
+                {
+                    _ = await Store.GetGroupAsync(sourceGroupId, token).ConfigureAwait(false)
+                        ?? throw GroupNotFound(sourceGroupId);
+                    _ = await Store.GetMemberAsync(sourceGroupId, inviterId, token).ConfigureAwait(false)
+                        ?? throw NotAMember(sourceGroupId, inviterId);
+                    _ = await Store.GetMemberAsync(sourceGroupId, inviteeId, token).ConfigureAwait(false)
+                        ?? throw NotAMember(sourceGroupId, inviteeId);
+                }
+
                 var request = new PendingRequest(
                     RequestKind.GroupInvite,
                     inviterId,
                     inviteeId,
                     groupId,
-                    comment);
+                    comment,
+                    sourceGroupId: sourceGroupId);
                 await Store.SaveAsync(request, token).ConfigureAwait(false);
+                request = (await Store.GetRequestAsync(request.Id, CancellationToken.None).ConfigureAwait(false))!;
                 Publish(new DomainEvent(inviteeId, new RequestReceivedEvent(request)), inviterId);
                 return request;
             },
@@ -666,25 +743,46 @@ public sealed class PlatformService : IAsyncDisposable
     public Task ResolveRequestAsync(
         string flag,
         bool approve,
+        string reason,
+        string remark,
+        CancellationToken cancellationToken) =>
+        ResolveRequestAsync(flag, approve, reason, remark, expectedSelfId: null,
+            cancellationToken: cancellationToken);
+
+    public Task ResolveRequestAsync(
+        string flag,
+        bool approve,
         string reason = "",
         string remark = "",
+        string? expectedSelfId = null,
+        string? expectedRequestId = null,
         CancellationToken cancellationToken = default) =>
         MutateAsync(
             async token =>
             {
-                var request = await Store.GetRequestByFlagAsync(flag, token).ConfigureAwait(false)
-                    ?? throw RequestNotFound(flag);
+                var request = expectedRequestId is null
+                    ? await Store.GetRequestByFlagAsync(flag, expectedSelfId, token).ConfigureAwait(false)
+                    : await Store.GetRequestAsync(expectedRequestId, token).ConfigureAwait(false);
+                if (request is null || request.Flag != flag
+                    || (expectedSelfId is not null && request.SelfId != expectedSelfId))
+                {
+                    throw RequestNotFound(flag);
+                }
                 if (request.Resolution is not null)
                 {
                     throw NotPermitted("This request has already been resolved");
                 }
+
+                await ValidateRequestResolutionAsync(request, token).ConfigureAwait(false);
 
                 if (!approve)
                 {
                     _ = await Store.ResolveRequestAsync(
                         request.Id,
                         RequestResolution.Rejected(reason),
-                        token).ConfigureAwait(false);
+                        resolvedBy: request.SelfId,
+                        cancellationToken: token).ConfigureAwait(false)
+                        ?? throw NotPermitted("This request has already been resolved");
                     return;
                 }
 
@@ -693,6 +791,7 @@ public sealed class PlatformService : IAsyncDisposable
                     case RequestKind.Friend:
                         await Store.AcceptFriendRequestAsync(request, remark, token).ConfigureAwait(false);
                         Publish(new DomainEvent(request.SelfId, new FriendAddedEvent(request.RequesterId)));
+                        Publish(new DomainEvent(request.RequesterId, new FriendAddedEvent(request.SelfId)));
                         break;
                     case RequestKind.GroupJoin:
                         if (request.GroupId is null)
@@ -716,6 +815,19 @@ public sealed class PlatformService : IAsyncDisposable
                             request.SelfId,
                             CancellationToken.None).ConfigureAwait(false);
                         break;
+                    case RequestKind.GroupInvitedJoin:
+                        if (request.GroupId is null || request.TargetUserId is null)
+                        {
+                            throw InvalidParameter("The invited join request is missing its group or target user");
+                        }
+
+                        _ = await Store.AcceptGroupRequestAsync(request, request.GroupId, request.TargetUserId,
+                            request.SelfId, token).ConfigureAwait(false);
+                        await PublishToGroupBotsAsync(request.GroupId,
+                            new GroupMemberAddedEvent(new GroupMemberChange(request.GroupId, request.TargetUserId,
+                                request.SelfId, GroupMemberChangeReason.Administrative, request.RequesterId)),
+                            request.SelfId, CancellationToken.None).ConfigureAwait(false);
+                        break;
                     case RequestKind.GroupInvite:
                         if (request.GroupId is null)
                         {
@@ -734,7 +846,8 @@ public sealed class PlatformService : IAsyncDisposable
                                 request.GroupId,
                                 request.SelfId,
                                 request.RequesterId,
-                                GroupMemberChangeReason.Invited)),
+                                GroupMemberChangeReason.Invited,
+                                request.RequesterId)),
                             request.RequesterId,
                             CancellationToken.None).ConfigureAwait(false);
                         break;
@@ -783,19 +896,7 @@ public sealed class PlatformService : IAsyncDisposable
         string userId,
         Asset asset,
         CancellationToken cancellationToken = default) =>
-        MutateAsync(
-            async token =>
-            {
-                _ = await Store.GetMemberAsync(groupId, userId, token).ConfigureAwait(false)
-                    ?? throw NotAMember(groupId, userId);
-                await Store.SaveAsync(asset, token).ConfigureAwait(false);
-                await PublishToGroupBotsAsync(
-                    groupId,
-                    new GroupFileUploadedEvent(new GroupFileUpload(groupId, userId, asset)),
-                    userId,
-                    CancellationToken.None).ConfigureAwait(false);
-            },
-            cancellationToken);
+        ShareGroupFileAsync(groupId, userId, asset, "/", cancellationToken);
 
     public Task SaveAssetAsync(
         Asset asset,
@@ -823,12 +924,14 @@ public sealed class PlatformService : IAsyncDisposable
             }
 
             _disposed = true;
+            _accountCredentials.Clear();
             List<ChannelWriter<DomainEvent>> writers;
             lock (_stateSync)
             {
                 writers = _subscribers.Values.Select(channel => channel.Writer).ToList();
                 _subscribers.Clear();
                 _registeredBots.Clear();
+                _botPresence.Clear();
             }
 
             foreach (var writer in writers)
@@ -877,7 +980,8 @@ public sealed class PlatformService : IAsyncDisposable
                 groupId,
                 userId,
                 operatorId ?? userId,
-                reason)),
+                reason,
+                reason == GroupMemberChangeReason.Invited ? operatorId : null)),
             operatorId,
             CancellationToken.None).ConfigureAwait(false);
         return member;
@@ -890,12 +994,18 @@ public sealed class PlatformService : IAsyncDisposable
         string selfId,
         CancellationToken cancellationToken)
     {
+        if (senderId == selfId && GetBotPresence(selfId) is { IsOnline: false })
+            throw NotPermitted("The bot account is offline");
         if (scene == ChatScene.Group)
         {
             var group = await Store.GetGroupAsync(peerId, cancellationToken).ConfigureAwait(false)
                 ?? throw GroupNotFound(peerId);
             var member = await Store.GetMemberAsync(peerId, senderId, cancellationToken).ConfigureAwait(false)
                 ?? throw NotAMember(peerId, senderId);
+            if (selfId != senderId && await Store.GetMemberAsync(peerId, selfId, cancellationToken).ConfigureAwait(false) is null)
+            {
+                throw NotAMember(peerId, selfId);
+            }
             if (member.IsMuted)
             {
                 throw new PlatformException(
@@ -923,6 +1033,8 @@ public sealed class PlatformService : IAsyncDisposable
 
         _ = await Store.GetUserAsync(peerId, cancellationToken).ConfigureAwait(false)
             ?? throw UserNotFound(peerId);
+        _ = await Store.GetUserAsync(selfId, cancellationToken).ConfigureAwait(false)
+            ?? throw UserNotFound(selfId);
         if (selfId == peerId)
         {
             throw NotPermitted("A private conversation must have two distinct participants");
@@ -939,18 +1051,31 @@ public sealed class PlatformService : IAsyncDisposable
         string operatorId,
         CancellationToken cancellationToken)
     {
+        if (message.Scene != ChatScene.Group)
+        {
+            if (operatorId != message.SelfId && operatorId != message.PeerId)
+            {
+                throw NotPermitted("A private message can only be recalled by a conversation participant");
+            }
+
+            if (message.SenderId != operatorId)
+            {
+                throw NotPermitted("You can only recall private messages that you sent");
+            }
+
+            _ = await Store.GetUserAsync(operatorId, cancellationToken).ConfigureAwait(false)
+                ?? throw UserNotFound(operatorId);
+            return;
+        }
+
+        var actor = await Store.GetMemberAsync(message.PeerId, operatorId, cancellationToken).ConfigureAwait(false)
+            ?? throw NotAMember(message.PeerId, operatorId);
         if (message.SenderId == operatorId)
         {
             return;
         }
 
-        if (message.Scene != ChatScene.Group)
-        {
-            throw NotPermitted("You can only recall private messages that you sent");
-        }
-
-        var actor = await Store.GetMemberAsync(message.PeerId, operatorId, cancellationToken).ConfigureAwait(false);
-        if (actor is null || actor.Role <= GroupRole.Member)
+        if (actor.Role <= GroupRole.Member)
         {
             throw NotPermitted("Administrator privileges are required to recall another user's message");
         }
@@ -984,6 +1109,11 @@ public sealed class PlatformService : IAsyncDisposable
         }
     }
 
+    private string[] RegisteredBotIds()
+    {
+        lock (_stateSync) return _registeredBots.ToArray();
+    }
+
     private async Task PublishToGroupBotsAsync(
         string groupId,
         DomainEventPayload payload,
@@ -998,12 +1128,14 @@ public sealed class PlatformService : IAsyncDisposable
         }
 
         var memberIds = members.Select(member => member.UserId).ToHashSet(StringComparer.Ordinal);
-        var recipients = registered.Where(memberIds.Contains).ToArray();
-        if (recipients.Length == 0)
+        // A removed bot receives its own departure after membership is committed.
+        // No other account outside the group is a recipient.
+        if (payload is GroupMemberRemovedEvent removed)
         {
-            recipients = registered;
+            memberIds.Add(removed.Change.UserId);
         }
 
+        var recipients = registered.Where(memberIds.Contains).ToArray();
         foreach (var selfId in recipients)
         {
             Publish(new DomainEvent(selfId, payload), origin);
@@ -1015,7 +1147,9 @@ public sealed class PlatformService : IAsyncDisposable
         ChannelWriter<DomainEvent>[] writers;
         lock (_stateSync)
         {
-            if (origin == domainEvent.SelfId && !_echoesSelfEvents)
+            if (domainEvent.Payload is not BotPresenceChangedEvent
+                && ((origin == domainEvent.SelfId && !_echoesSelfEvents)
+                    || _botPresence.GetValueOrDefault(domainEvent.SelfId) is { IsOnline: false }))
             {
                 return;
             }
@@ -1038,6 +1172,7 @@ public sealed class PlatformService : IAsyncDisposable
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            RequireBotActionOnline();
             return await mutation(cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -1053,6 +1188,7 @@ public sealed class PlatformService : IAsyncDisposable
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            RequireBotActionOnline();
             await mutation(cancellationToken).ConfigureAwait(false);
         }
         finally

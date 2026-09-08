@@ -25,8 +25,8 @@ public sealed partial class AsukaStore
                 {
                     groupCommand.Transaction = transaction;
                     groupCommand.CommandText = """
-                        INSERT INTO groups(id, name, avatar, intro, level, max_member_count, whole_muted, created_at)
-                        VALUES($id, $name, $avatar, $intro, $level, $max_count, $whole_muted, $created_at);
+                        INSERT INTO groups(id, name, avatar, intro, level, max_member_count, whole_muted, created_at, anonymous_enabled)
+                        VALUES($id, $name, $avatar, $intro, $level, $max_count, $whole_muted, $created_at, $anonymous_enabled);
                         """;
                     Add(groupCommand, "$id", group.Id);
                     Add(groupCommand, "$name", group.Name);
@@ -35,6 +35,7 @@ public sealed partial class AsukaStore
                     Add(groupCommand, "$level", group.Level);
                     Add(groupCommand, "$max_count", group.MaxMemberCount);
                     Add(groupCommand, "$whole_muted", group.WholeMuted);
+                    Add(groupCommand, "$anonymous_enabled", group.AnonymousEnabled);
                     Add(groupCommand, "$created_at", ToTimestamp(group.CreatedAt));
                     _ = await groupCommand.ExecuteNonQueryAsync(token).ConfigureAwait(false);
                 }
@@ -127,7 +128,8 @@ public sealed partial class AsukaStore
                 Add(command, "$id", id);
                 _ = await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
             },
-            StoreChangeKind.Users | StoreChangeKind.Members | StoreChangeKind.Friendships | StoreChangeKind.Conversations,
+            StoreChangeKind.Users | StoreChangeKind.Members | StoreChangeKind.Friendships
+                | StoreChangeKind.Messages | StoreChangeKind.Conversations,
             cancellationToken);
 
     public Task SaveAsync(Group group, CancellationToken cancellationToken = default) =>
@@ -136,12 +138,13 @@ public sealed partial class AsukaStore
             {
                 using var command = _connection.CreateCommand();
                 command.CommandText = """
-                    INSERT INTO groups(id, name, avatar, intro, level, max_member_count, whole_muted, created_at)
-                    VALUES($id, $name, $avatar, $intro, $level, $max_count, $whole_muted, $created_at)
+                    INSERT INTO groups(id, name, avatar, intro, level, max_member_count, whole_muted, created_at, anonymous_enabled)
+                    VALUES($id, $name, $avatar, $intro, $level, $max_count, $whole_muted, $created_at, $anonymous_enabled)
                     ON CONFLICT(id) DO UPDATE SET
                         name=excluded.name, avatar=excluded.avatar, intro=excluded.intro,
                         level=excluded.level, max_member_count=excluded.max_member_count,
-                        whole_muted=excluded.whole_muted, created_at=excluded.created_at;
+                        whole_muted=excluded.whole_muted, created_at=excluded.created_at,
+                        anonymous_enabled=excluded.anonymous_enabled;
                     """;
                 Add(command, "$id", group.Id);
                 Add(command, "$name", group.Name);
@@ -150,6 +153,7 @@ public sealed partial class AsukaStore
                 Add(command, "$level", group.Level);
                 Add(command, "$max_count", group.MaxMemberCount);
                 Add(command, "$whole_muted", group.WholeMuted);
+                Add(command, "$anonymous_enabled", group.AnonymousEnabled);
                 Add(command, "$created_at", ToTimestamp(group.CreatedAt));
                 _ = await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
             },
@@ -162,7 +166,7 @@ public sealed partial class AsukaStore
             {
                 using var command = _connection.CreateCommand();
                 command.CommandText = """
-                    SELECT id, name, avatar, intro, level, max_member_count, whole_muted, created_at
+                    SELECT id, name, avatar, intro, level, max_member_count, whole_muted, created_at, anonymous_enabled
                     FROM groups WHERE id=$id LIMIT 1;
                     """;
                 Add(command, "$id", id);
@@ -177,7 +181,7 @@ public sealed partial class AsukaStore
             {
                 using var command = _connection.CreateCommand();
                 command.CommandText = """
-                    SELECT id, name, avatar, intro, level, max_member_count, whole_muted, created_at
+                    SELECT id, name, avatar, intro, level, max_member_count, whole_muted, created_at, anonymous_enabled
                     FROM groups ORDER BY created_at, id;
                     """;
                 using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
@@ -300,7 +304,7 @@ public sealed partial class AsukaStore
             {
                 using var command = _connection.CreateCommand();
                 command.CommandText = """
-                    SELECT g.id, g.name, g.avatar, g.intro, g.level, g.max_member_count, g.whole_muted, g.created_at
+                    SELECT g.id, g.name, g.avatar, g.intro, g.level, g.max_member_count, g.whole_muted, g.created_at, g.anonymous_enabled
                     FROM groups g
                     INNER JOIN group_members m ON m.group_id=g.id
                     WHERE m.user_id=$user_id
@@ -498,7 +502,8 @@ public sealed partial class AsukaStore
         level: reader.GetInt32(4),
         maxMemberCount: reader.GetInt32(5),
         wholeMuted: reader.GetBoolean(6),
-        createdAt: FromTimestamp(reader.GetInt64(7)));
+        createdAt: FromTimestamp(reader.GetInt64(7)),
+        anonymousEnabled: reader.GetBoolean(8));
 
     private static GroupMember ReadMember(SqliteDataReader reader) => new(
         groupId: reader.GetString(0),

@@ -30,6 +30,11 @@ public sealed partial class AsukaStore
                     };
                 }
 
+                if (await HasFriendshipForRequestAsync(request, transaction, token).ConfigureAwait(false))
+                {
+                    throw new PlatformException(PlatformError.AlreadyExists, "The users are already friends");
+                }
+
                 var createdAt = ToTimestamp(DateTimeOffset.UtcNow);
                 using (var friendships = _connection.CreateCommand())
                 {
@@ -51,7 +56,8 @@ public sealed partial class AsukaStore
                     _ = await friendships.ExecuteNonQueryAsync(token).ConfigureAwait(false);
                 }
 
-                await MarkAcceptedAsync(request.Id, transaction, token).ConfigureAwait(false);
+                await MarkAcceptedAsync(request.Id, request.SelfId, transaction, token).ConfigureAwait(false);
+                await IgnoreOtherFriendRequestsAsync(request, transaction, token).ConfigureAwait(false);
                 await transaction.CommitAsync(token).ConfigureAwait(false);
             },
             StoreChangeKind.Requests | StoreChangeKind.Friendships,
@@ -117,6 +123,21 @@ public sealed partial class AsukaStore
                     };
                 }
 
+                if (request.Kind is RequestKind.GroupJoin or RequestKind.GroupInvitedJoin)
+                {
+                    using var authority = _connection.CreateCommand();
+                    authority.Transaction = transaction;
+                    authority.CommandText = "SELECT role FROM group_members WHERE group_id=$group_id AND user_id=$user_id;";
+                    Add(authority, "$group_id", groupId);
+                    Add(authority, "$user_id", request.SelfId);
+                    var role = await authority.ExecuteScalarAsync(token).ConfigureAwait(false) as string;
+                    if (role is not ("admin" or "owner"))
+                    {
+                        throw new PlatformException(PlatformError.NotPermitted,
+                            "Administrator privileges are required to resolve group requests");
+                    }
+                }
+
                 using (var countCommand = _connection.CreateCommand())
                 {
                     countCommand.Transaction = transaction;
@@ -151,7 +172,7 @@ public sealed partial class AsukaStore
                     _ = await memberCommand.ExecuteNonQueryAsync(token).ConfigureAwait(false);
                 }
 
-                await MarkAcceptedAsync(request.Id, transaction, token).ConfigureAwait(false);
+                await MarkAcceptedAsync(request.Id, request.SelfId, transaction, token).ConfigureAwait(false);
                 await transaction.CommitAsync(token).ConfigureAwait(false);
                 return member;
             },
@@ -162,21 +183,34 @@ public sealed partial class AsukaStore
         WriteAsync(
             async token =>
             {
+                using var transaction = _connection.BeginTransaction(deferred: false);
                 using var command = _connection.CreateCommand();
+                command.Transaction = transaction;
                 command.CommandText = """
                     INSERT INTO pending_requests(
                         id, flag, kind, requester_id, group_id, self_id, comment, time,
-                        resolution_state, resolution_reason)
+                        resolution_state, resolution_reason, target_user_id, source_group_id,
+                        is_filtered, via, resolved_by, notification_seq)
                     VALUES($id, $flag, $kind, $requester_id, $group_id, $self_id, $comment, $time,
-                        $resolution_state, $resolution_reason)
+                        $resolution_state, $resolution_reason, $target_user_id, $source_group_id,
+                        $is_filtered, $via, $resolved_by,
+                        CASE WHEN $notification_seq > 0 THEN $notification_seq ELSE
+                            COALESCE((SELECT notification_seq FROM pending_requests WHERE id=$id),
+                                (SELECT next_seq FROM request_notification_sequence WHERE id=1)) END)
                     ON CONFLICT(id) DO UPDATE SET
                         flag=excluded.flag, kind=excluded.kind, requester_id=excluded.requester_id,
                         group_id=excluded.group_id, self_id=excluded.self_id, comment=excluded.comment,
                         time=excluded.time, resolution_state=excluded.resolution_state,
-                        resolution_reason=excluded.resolution_reason;
+                        resolution_reason=excluded.resolution_reason, target_user_id=excluded.target_user_id,
+                        source_group_id=excluded.source_group_id, is_filtered=excluded.is_filtered,
+                        via=excluded.via, resolved_by=excluded.resolved_by;
+                    UPDATE request_notification_sequence
+                    SET next_seq=MAX(next_seq, (SELECT COALESCE(MAX(notification_seq), 0) + 1 FROM pending_requests))
+                    WHERE id=1;
                     """;
                 BindRequest(command, request);
                 _ = await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+                await transaction.CommitAsync(token).ConfigureAwait(false);
             },
             StoreChangeKind.Requests,
             cancellationToken);
@@ -185,7 +219,11 @@ public sealed partial class AsukaStore
         ReadRequestAsync("id", id, cancellationToken);
 
     public Task<PendingRequest?> GetRequestByFlagAsync(string flag, CancellationToken cancellationToken = default) =>
-        ReadRequestAsync("flag", flag, cancellationToken);
+        GetRequestByFlagAsync(flag, null, cancellationToken);
+
+    public Task<PendingRequest?> GetRequestByFlagAsync(string flag, string? selfId,
+        CancellationToken cancellationToken = default) =>
+        WithGateAsync(token => ReadRequestWithoutGateAsync("flag", flag, selfId, token), cancellationToken);
 
     public Task<IReadOnlyList<PendingRequest>> GetPendingRequestsAsync(
         string selfId,
@@ -196,6 +234,7 @@ public sealed partial class AsukaStore
     public Task<PendingRequest?> ResolveRequestAsync(
         string requestId,
         RequestResolution resolution,
+        string? resolvedBy = null,
         CancellationToken cancellationToken = default) =>
         WriteAsync(
             async token =>
@@ -204,11 +243,12 @@ public sealed partial class AsukaStore
                 {
                     command.CommandText = """
                         UPDATE pending_requests
-                        SET resolution_state=$state, resolution_reason=$reason
-                        WHERE id=$id;
+                        SET resolution_state=$state, resolution_reason=$reason, resolved_by=$resolved_by
+                        WHERE id=$id AND resolution_state IS NULL;
                         """;
                     Add(command, "$state", resolution.Status.ToString().ToLowerInvariant());
                     Add(command, "$reason", resolution.Reason);
+                    Add(command, "$resolved_by", resolvedBy);
                     Add(command, "$id", requestId);
                     if (await command.ExecuteNonQueryAsync(token).ConfigureAwait(false) == 0)
                     {
@@ -216,7 +256,7 @@ public sealed partial class AsukaStore
                     }
                 }
 
-                return await ReadRequestWithoutGateAsync("id", requestId, token).ConfigureAwait(false);
+                return await ReadRequestWithoutGateAsync("id", requestId, null, token).ConfigureAwait(false);
             },
             StoreChangeKind.Requests,
             cancellationToken);
@@ -263,18 +303,21 @@ public sealed partial class AsukaStore
         string column,
         string value,
         CancellationToken cancellationToken) =>
-        WithGateAsync(token => ReadRequestWithoutGateAsync(column, value, token), cancellationToken);
+        WithGateAsync(token => ReadRequestWithoutGateAsync(column, value, null, token), cancellationToken);
 
     private async Task<PendingRequest?> ReadRequestWithoutGateAsync(
         string column,
         string value,
+        string? selfId,
         CancellationToken cancellationToken)
     {
         using var command = _connection.CreateCommand();
         command.CommandText = $"""
-            {RequestSelect} WHERE {column}=$value LIMIT 1;
+            {RequestSelect} WHERE {column}=$value AND ($self_id IS NULL OR self_id=$self_id)
+            ORDER BY time DESC, notification_seq DESC LIMIT 1;
             """;
         Add(command, "$value", value);
+        Add(command, "$self_id", selfId);
         using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadRequest(reader) : null;
     }
@@ -306,22 +349,25 @@ public sealed partial class AsukaStore
 
     private const string RequestSelect = """
         SELECT id, flag, kind, requester_id, group_id, self_id, comment, time,
-               resolution_state, resolution_reason
+               resolution_state, resolution_reason, target_user_id, source_group_id,
+               is_filtered, via, resolved_by, notification_seq
         FROM pending_requests
         """;
 
     private async Task MarkAcceptedAsync(
         string requestId,
+        string resolvedBy,
         SqliteTransaction transaction,
         CancellationToken cancellationToken)
     {
         using var command = _connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            UPDATE pending_requests SET resolution_state='accepted', resolution_reason=''
+            UPDATE pending_requests SET resolution_state='accepted', resolution_reason='', resolved_by=$resolved_by
             WHERE id=$id AND resolution_state IS NULL;
             """;
         Add(command, "$id", requestId);
+        Add(command, "$resolved_by", resolvedBy);
         if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0)
         {
             throw new PlatformException(PlatformError.NotPermitted, "This request has already been resolved");
@@ -359,6 +405,12 @@ public sealed partial class AsukaStore
         Add(command, "$time", ToTimestamp(request.Time));
         Add(command, "$resolution_state", request.Resolution?.Status.ToString().ToLowerInvariant());
         Add(command, "$resolution_reason", request.Resolution?.Reason);
+        Add(command, "$target_user_id", request.TargetUserId);
+        Add(command, "$source_group_id", request.SourceGroupId);
+        Add(command, "$is_filtered", request.IsFiltered);
+        Add(command, "$via", request.Via);
+        Add(command, "$resolved_by", request.ResolvedBy);
+        Add(command, "$notification_seq", request.NotificationSequence);
     }
 
     private static PendingRequest ReadRequest(SqliteDataReader reader)
@@ -379,7 +431,13 @@ public sealed partial class AsukaStore
             id: reader.GetString(0),
             flag: reader.GetString(1),
             time: FromTimestamp(reader.GetInt64(7)),
-            resolution: resolution);
+            resolution: resolution,
+            targetUserId: reader.IsDBNull(10) ? null : reader.GetString(10),
+            sourceGroupId: reader.IsDBNull(11) ? null : reader.GetString(11),
+            isFiltered: reader.GetBoolean(12),
+            via: reader.GetString(13),
+            resolvedBy: reader.IsDBNull(14) ? null : reader.GetString(14),
+            notificationSequence: reader.GetInt64(15));
     }
 
     private static Asset ReadAsset(SqliteDataReader reader)

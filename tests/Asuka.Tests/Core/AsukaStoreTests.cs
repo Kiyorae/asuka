@@ -166,20 +166,10 @@ public sealed class AsukaStoreTests
             using (var connection = new SqliteConnection($"Data Source={path};Pooling=False"))
             {
                 connection.Open();
+                LegacyStoreSchema.Create(connection, 1);
                 using var command = connection.CreateCommand();
                 command.CommandText = """
-                    CREATE TABLE users(
-                        id TEXT PRIMARY KEY, name TEXT NOT NULL, nickname TEXT NOT NULL,
-                        avatar TEXT, sex TEXT NOT NULL, age INTEGER, sign TEXT NOT NULL,
-                        created_at INTEGER NOT NULL);
-                    CREATE TABLE groups(created_at INTEGER NOT NULL);
-                    CREATE TABLE group_members(
-                        joined_at INTEGER NOT NULL, last_sent_at INTEGER, muted_until INTEGER);
-                    CREATE TABLE friendships(created_at INTEGER NOT NULL);
-                    CREATE TABLE messages(time INTEGER NOT NULL, recalled_at INTEGER);
-                    CREATE TABLE pending_requests(time INTEGER NOT NULL);
                     INSERT INTO users VALUES('10001', 'Legacy', 'Legacy', NULL, 'unknown', NULL, '', 1000);
-                    PRAGMA user_version=1;
                     """;
                 _ = command.ExecuteNonQuery();
             }
@@ -192,7 +182,7 @@ public sealed class AsukaStoreTests
             verification.Open();
             using var version = verification.CreateCommand();
             version.CommandText = "PRAGMA user_version;";
-            Assert.AreEqual(2L, version.ExecuteScalar());
+            Assert.AreEqual((long)AsukaStore.CurrentSchemaVersion, version.ExecuteScalar());
         }
         finally
         {

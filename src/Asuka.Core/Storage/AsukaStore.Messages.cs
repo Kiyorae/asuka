@@ -5,11 +5,40 @@ namespace Asuka.Core;
 public sealed partial class AsukaStore
 {
     public Task<Message> AppendMessageAsync(Message message, CancellationToken cancellationToken = default) =>
+        AppendMessageCoreAsync(message, validateReplyTargets: false, cancellationToken);
+
+    internal Task<Message> AppendLiveMessageAsync(Message message, CancellationToken cancellationToken = default) =>
+        AppendMessageCoreAsync(message, validateReplyTargets: true, cancellationToken);
+
+    private Task<Message> AppendMessageCoreAsync(Message message, bool validateReplyTargets, CancellationToken cancellationToken) =>
         WriteAsync(
             async token =>
             {
                 using var transaction = _connection.BeginTransaction(deferred: false);
                 var sqliteTransaction = transaction;
+                if (validateReplyTargets)
+                {
+                    message = await PrepareLiveMessageAsync(message, sqliteTransaction, token).ConfigureAwait(false);
+                    foreach (var reply in message.Content.OfType<ReplySegment>())
+                    {
+                        using var target = _connection.CreateCommand();
+                        target.Transaction = sqliteTransaction;
+                        target.CommandText = """
+                            SELECT COUNT(*) FROM messages WHERE id=$id AND scene=$scene AND peer_id=$peer
+                                AND self_id=$self AND recalled_at IS NULL;
+                            """;
+                        Add(target, "$id", reply.MessageId);
+                        Add(target, "$scene", message.Scene.ToStorageValue());
+                        Add(target, "$peer", message.PeerId);
+                        Add(target, "$self", message.SelfId);
+                        if (Convert.ToInt64(await target.ExecuteScalarAsync(token).ConfigureAwait(false),
+                            System.Globalization.CultureInfo.InvariantCulture) != 1)
+                        {
+                            throw new PlatformException(PlatformError.InvalidParameter,
+                                "A reply must reference an active message in this conversation");
+                        }
+                    }
+                }
                 var stored = message;
                 if (stored.Seq == 0)
                 {
@@ -146,36 +175,66 @@ public sealed partial class AsukaStore
         return null;
     }
 
-    public Task<Message?> RecallMessageAsync(
+    public async Task<Message?> RecallMessageAsync(
         string id,
         string operatorId,
         CancellationToken cancellationToken = default) =>
-        WriteAsync(
+        (await RecallMessageWithResultAsync(id, operatorId, cancellationToken).ConfigureAwait(false)).Message;
+
+    internal async Task<(Message? Message, bool Changed, bool EssenceRemoved)> RecallMessageWithResultAsync(
+        string id,
+        string operatorId,
+        CancellationToken cancellationToken)
+    {
+        var result = await WithGateAsync(
             async token =>
             {
+                using var transaction = _connection.BeginTransaction(deferred: false);
                 var recalledAt = DateTimeOffset.UtcNow;
+                bool wasEssence;
+                using (var essence = _connection.CreateCommand())
+                {
+                    essence.Transaction = transaction;
+                    essence.CommandText = "SELECT EXISTS(SELECT 1 FROM group_essence_messages WHERE message_id=$id);";
+                    Add(essence, "$id", id);
+                    wasEssence = (long)(await essence.ExecuteScalarAsync(token).ConfigureAwait(false))! != 0;
+                }
+
+                bool changed;
                 using (var command = _connection.CreateCommand())
                 {
+                    command.Transaction = transaction;
                     command.CommandText = """
-                        UPDATE messages SET recalled_at=$recalled_at, recalled_by=$recalled_by WHERE id=$id;
+                        UPDATE messages SET recalled_at=$recalled_at, recalled_by=$recalled_by
+                        WHERE id=$id AND recalled_at IS NULL;
                         """;
                     Add(command, "$recalled_at", ToTimestamp(recalledAt));
                     Add(command, "$recalled_by", operatorId);
                     Add(command, "$id", id);
-                    if (await command.ExecuteNonQueryAsync(token).ConfigureAwait(false) == 0)
-                    {
-                        return null;
-                    }
+                    changed = await command.ExecuteNonQueryAsync(token).ConfigureAwait(false) != 0;
                 }
 
-                using var read = _connection.CreateCommand();
-                read.CommandText = $"{MessageSelect} WHERE id=$id LIMIT 1;";
-                Add(read, "$id", id);
-                using var reader = await read.ExecuteReaderAsync(token).ConfigureAwait(false);
-                return await reader.ReadAsync(token).ConfigureAwait(false) ? ReadMessage(reader) : null;
+                Message? message;
+                using (var read = _connection.CreateCommand())
+                {
+                    read.Transaction = transaction;
+                    read.CommandText = $"{MessageSelect} WHERE id=$id LIMIT 1;";
+                    Add(read, "$id", id);
+                    using var reader = await read.ExecuteReaderAsync(token).ConfigureAwait(false);
+                    message = await reader.ReadAsync(token).ConfigureAwait(false) ? ReadMessage(reader) : null;
+                }
+
+                await transaction.CommitAsync(token).ConfigureAwait(false);
+                return (Message: message, Changed: changed, EssenceRemoved: changed && wasEssence);
             },
-            StoreChangeKind.Messages | StoreChangeKind.Conversations,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
+        if (result.Changed)
+        {
+            Publish(StoreChangeKind.Messages | StoreChangeKind.Conversations);
+        }
+
+        return result;
+    }
 
     public Task<IReadOnlyList<ActiveChat>> GetActiveChatsAsync(
         string selfId,
@@ -199,7 +258,8 @@ public sealed partial class AsukaStore
             cancellationToken);
 
     private const string MessageSelect = """
-        SELECT id, seq, scene, peer_id, sender_id, self_id, content, time, direction, recalled_at, recalled_by
+        SELECT id, seq, scene, peer_id, sender_id, self_id, content, time, direction, recalled_at, recalled_by,
+               anonymous_id, anonymous_name, anonymous_flag
         FROM messages
         """;
 
@@ -208,17 +268,22 @@ public sealed partial class AsukaStore
         SqliteTransaction? transaction,
         CancellationToken cancellationToken)
     {
+        ValidateStoredAnonymousMessage(message);
         using var command = _connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO messages(
-                id, seq, scene, peer_id, sender_id, self_id, content, time, direction, recalled_at, recalled_by)
-            VALUES($id, $seq, $scene, $peer_id, $sender_id, $self_id, $content, $time, $direction, $recalled_at, $recalled_by)
+                id, seq, scene, peer_id, sender_id, self_id, content, time, direction, recalled_at, recalled_by,
+                anonymous_id, anonymous_name, anonymous_flag)
+            VALUES($id, $seq, $scene, $peer_id, $sender_id, $self_id, $content, $time, $direction, $recalled_at, $recalled_by,
+                $anonymous_id, $anonymous_name, $anonymous_flag)
             ON CONFLICT(id) DO UPDATE SET
                 seq=excluded.seq, scene=excluded.scene, peer_id=excluded.peer_id,
                 sender_id=excluded.sender_id, self_id=excluded.self_id, content=excluded.content,
                 time=excluded.time, direction=excluded.direction,
-                recalled_at=excluded.recalled_at, recalled_by=excluded.recalled_by;
+                recalled_at=excluded.recalled_at, recalled_by=excluded.recalled_by,
+                anonymous_id=excluded.anonymous_id, anonymous_name=excluded.anonymous_name,
+                anonymous_flag=excluded.anonymous_flag;
             """;
         Add(command, "$id", message.Id);
         Add(command, "$seq", message.Seq);
@@ -231,6 +296,9 @@ public sealed partial class AsukaStore
         Add(command, "$direction", message.Direction.ToStorageValue());
         Add(command, "$recalled_at", ToTimestamp(message.RecalledAt));
         Add(command, "$recalled_by", message.RecalledBy);
+        Add(command, "$anonymous_id", message.Anonymous?.Id);
+        Add(command, "$anonymous_name", message.Anonymous?.Name);
+        Add(command, "$anonymous_flag", message.Anonymous?.Flag);
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -297,7 +365,8 @@ public sealed partial class AsukaStore
         seq: reader.GetInt64(1),
         time: FromTimestamp(reader.GetInt64(7)),
         recalledAt: GetOptionalTimestamp(reader, 9),
-        recalledBy: reader.IsDBNull(10) ? null : reader.GetString(10));
+        recalledBy: reader.IsDBNull(10) ? null : reader.GetString(10),
+        anonymous: reader.IsDBNull(11) ? null : new AnonymousIdentity(reader.GetInt64(11), reader.GetString(12), reader.GetString(13)));
 
     private static IReadOnlyList<ForwardNode>? FindForwardNodes(IEnumerable<MessageSegment> content, string id)
     {

@@ -18,7 +18,10 @@ public enum StoreChangeKind
     Conversations = 1 << 5,
     Assets = 1 << 6,
     Friendships = 1 << 7,
-    All = Users | Groups | Members | Messages | Requests | Conversations | Assets | Friendships,
+    Files = 1 << 8,
+    Notifications = 1 << 9,
+    CustomFaces = 1 << 10,
+    All = Users | Groups | Members | Messages | Requests | Conversations | Assets | Friendships | Files | Notifications | CustomFaces,
 }
 
 public sealed class StoreChangedEventArgs(StoreChangeKind changes) : EventArgs
@@ -28,7 +31,7 @@ public sealed class StoreChangedEventArgs(StoreChangeKind changes) : EventArgs
 
 public sealed partial class AsukaStore : IDisposable, IAsyncDisposable
 {
-    private const int CurrentSchemaVersion = 2;
+    internal const int CurrentSchemaVersion = 12;
     private static readonly JsonSerializerOptions PersistenceJsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
@@ -68,8 +71,17 @@ public sealed partial class AsukaStore : IDisposable, IAsyncDisposable
         }.ToString();
 
         _connection = new SqliteConnection(connectionString);
-        _connection.Open();
-        Initialize();
+        try
+        {
+            _connection.Open();
+            Initialize();
+        }
+        catch
+        {
+            _connection.Dispose();
+            _gate.Dispose();
+            throw;
+        }
     }
 
     public string DatabasePath { get; }
@@ -166,6 +178,29 @@ public sealed partial class AsukaStore : IDisposable, IAsyncDisposable
         {
             ApplyVersion2();
         }
+
+        if (version < 3)
+        {
+            ApplyVersion3();
+        }
+
+        if (version < 4)
+        {
+            ApplyVersion4();
+        }
+
+        if (version < 5)
+        {
+            ApplyVersion5();
+        }
+
+        if (version < 6) ApplyVersion6();
+        if (version < 7) ApplyVersion7();
+        if (version < 8) ApplyVersion8();
+        if (version < 9) ApplyVersion9();
+        if (version < 10) ApplyVersion10();
+        if (version < 11) ApplyVersion11();
+        if (version < 12) ApplyVersion12();
     }
 
     private void ApplyVersion1()
@@ -296,6 +331,34 @@ public sealed partial class AsukaStore : IDisposable, IAsyncDisposable
                 recalled_at=CASE WHEN recalled_at IS NULL THEN NULL ELSE (recalled_at * 10000) + {unixEpochTicks} END;
             UPDATE pending_requests SET time=(time * 10000) + {unixEpochTicks};
             PRAGMA user_version=2;
+            """;
+        command.ExecuteNonQuery();
+        transaction.Commit();
+    }
+
+    private void ApplyVersion3()
+    {
+        using var transaction = _connection.BeginTransaction();
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            CREATE TABLE message_reactions (
+                message_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                reaction TEXT NOT NULL,
+                reaction_type TEXT NOT NULL,
+                PRIMARY KEY(message_id, user_id, reaction_type, reaction),
+                FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX ix_message_reactions_user ON message_reactions(user_id);
+            CREATE TRIGGER clear_recalled_message_reactions
+                AFTER UPDATE OF recalled_at ON messages
+                WHEN NEW.recalled_at IS NOT NULL
+            BEGIN
+                DELETE FROM message_reactions WHERE message_id=NEW.id;
+            END;
+            PRAGMA user_version=3;
             """;
         command.ExecuteNonQuery();
         transaction.Commit();

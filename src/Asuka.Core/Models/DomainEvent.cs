@@ -18,6 +18,7 @@ public sealed record DomainEvent
 
 public abstract record DomainEventPayload;
 
+public sealed record BotPresenceChangedEvent(BotPresence Presence) : DomainEventPayload;
 public sealed record MessageEvent(Message Message) : DomainEventPayload;
 public sealed record MessageRecalledEvent(MessageRecalled Detail) : DomainEventPayload;
 public sealed record GroupMemberAddedEvent(GroupMemberChange Change) : DomainEventPayload;
@@ -25,12 +26,18 @@ public sealed record GroupMemberRemovedEvent(GroupMemberChange Change) : DomainE
 public sealed record GroupAdminChangedEvent(GroupAdminChange Change) : DomainEventPayload;
 public sealed record GroupMutedEvent(GroupMute Mute) : DomainEventPayload;
 public sealed record GroupNameChangedEvent(string GroupId, string OperatorId, string Name) : DomainEventPayload;
+public sealed record GroupDisbandedEvent(string GroupId, string OperatorId) : DomainEventPayload;
 public sealed record FriendAddedEvent(string UserId) : DomainEventPayload;
 public sealed record FriendRemovedEvent(string UserId) : DomainEventPayload;
 public sealed record RequestReceivedEvent(PendingRequest Request) : DomainEventPayload;
 public sealed record PokeEvent(PokeInteraction Poke) : DomainEventPayload;
 public sealed record MessageReactionEvent(MessageReaction Reaction) : DomainEventPayload;
 public sealed record GroupFileUploadedEvent(GroupFileUpload Upload) : DomainEventPayload;
+public sealed record FriendFileUploadedEvent(PrivateFileUpload Upload) : DomainEventPayload;
+public sealed record PeerPinChangedEvent(ChatScene Scene, string PeerId, bool IsPinned) : DomainEventPayload;
+public sealed record GroupEssenceMessageChangedEvent(string GroupId, long MessageSequence, string OperatorId, bool IsSet) : DomainEventPayload;
+public sealed record GroupHonorChangedEvent(GroupHonorChange Change) : DomainEventPayload;
+public sealed record GroupLuckyKingEvent(GroupLuckyKing Result) : DomainEventPayload;
 public sealed record ConnectedEvent : DomainEventPayload;
 public sealed record DisconnectedEvent : DomainEventPayload;
 
@@ -39,7 +46,8 @@ public sealed record MessageRecalled(
     ChatScene Scene,
     string PeerId,
     string SenderId,
-    string OperatorId);
+    string OperatorId,
+    AnonymousIdentity? Anonymous = null);
 
 public enum GroupMemberChangeReason
 {
@@ -52,7 +60,8 @@ public sealed record GroupMemberChange(
     string GroupId,
     string UserId,
     string OperatorId,
-    GroupMemberChangeReason Reason);
+    GroupMemberChangeReason Reason,
+    string? InviterId = null);
 
 public sealed record GroupAdminChange(
     string GroupId,
@@ -90,6 +99,8 @@ public sealed record MessageReaction(
     string PeerId,
     string UserId,
     string Reaction,
-    bool Added);
+    bool Added,
+    string ReactionType = "face");
 
-public sealed record GroupFileUpload(string GroupId, string UserId, Asset Asset);
+public sealed record GroupFileUpload(string GroupId, string UserId, Asset Asset, string? FileId = null, string? FileName = null);
+public sealed record PrivateFileUpload(string UserId, string SenderId, SharedFile File);

@@ -6,7 +6,7 @@ using System.Security.Cryptography;
 
 namespace Asuka.Core;
 
-public sealed class AssetStore : IDisposable
+public sealed partial class AssetStore : IDisposable
 {
     public const long DefaultMaximumByteCount = 64L * 1024 * 1024;
 
@@ -118,14 +118,25 @@ public sealed class AssetStore : IDisposable
             AssetSource.Inline);
     }
 
-    public async Task<Asset> StoreAsync(
+    public Task<Asset> StoreAsync(
         Stream source,
         string name,
         string? mimeType = null,
+        CancellationToken cancellationToken = default) =>
+        StoreAsync(source, name, mimeType, expectedSha256: null, cancellationToken);
+
+    /// <summary>Stages content and verifies its expected digest before publishing it to the shared cache.</summary>
+    public async Task<Asset> StoreAsync(
+        Stream source,
+        string name,
+        string? mimeType,
+        string? expectedSha256,
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(source);
+        ValidateExpectedSha256(expectedSha256);
+        cancellationToken.ThrowIfCancellationRequested();
         var temporary = Path.Combine(DirectoryPath, $".ingest-{Guid.NewGuid():N}.tmp");
         try
         {
@@ -165,6 +176,12 @@ public sealed class AssetStore : IDisposable
             }
 
             var id = Convert.ToHexStringLower(hash.GetHashAndReset());
+            if (expectedSha256 is not null && !string.Equals(expectedSha256, id, StringComparison.Ordinal))
+            {
+                throw new AssetChecksumMismatchException(expectedSha256, id);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
             var destination = LocationOf(id);
             if (File.Exists(destination))
             {
@@ -284,7 +301,7 @@ public sealed class AssetStore : IDisposable
 
             try
             {
-                return await DownloadAsync(uri, suggestedName, cancellationToken).ConfigureAwait(false);
+                return await DownloadAsync(uri, suggestedName, null, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is HttpRequestException or IOException)
             {
@@ -335,12 +352,57 @@ public sealed class AssetStore : IDisposable
         _ => null,
     };
 
-    private async Task<Asset> DownloadAsync(
+    public Task<Asset> DownloadAsync(
+        Uri uri,
+        string? suggestedName = null,
+        IReadOnlyDictionary<string, string>? headers = null,
+        CancellationToken cancellationToken = default) =>
+        DownloadAsync(uri, suggestedName, headers, expectedSha256: null, cancellationToken);
+
+    /// <summary>Downloads through the public-address boundary and verifies integrity before cache publication.</summary>
+    public async Task<Asset> DownloadAsync(
         Uri uri,
         string? suggestedName,
-        CancellationToken cancellationToken)
+        IReadOnlyDictionary<string, string>? headers,
+        string? expectedSha256,
+        CancellationToken cancellationToken = default)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(uri);
+        ValidateExpectedSha256(expectedSha256);
+        if (!uri.IsAbsoluteUri || uri.Scheme is not ("http" or "https") || uri.UserInfo.Length != 0)
+        {
+            throw new ArgumentException("Downloads require an HTTP(S) URL without embedded credentials", nameof(uri));
+        }
+
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        if (headers is not null)
+        {
+            if (headers.Count > 64) throw new ArgumentException("Too many download headers", nameof(headers));
+            var totalBytes = 0;
+            foreach (var (headerName, headerValue) in headers)
+            {
+                if (string.IsNullOrWhiteSpace(headerName) || headerValue is null
+                    || headerName.Contains('\r') || headerName.Contains('\n') || headerValue.Contains('\r') || headerValue.Contains('\n'))
+                {
+                    throw new ArgumentException("Invalid download header", nameof(headers));
+                }
+
+                totalBytes = checked(totalBytes + System.Text.Encoding.UTF8.GetByteCount(headerName) + System.Text.Encoding.UTF8.GetByteCount(headerValue));
+                if (totalBytes > 16 * 1024) throw new ArgumentException("Download headers exceed 16 KiB", nameof(headers));
+                if (headerName.ToLowerInvariant() is "host" or "content-length" or "transfer-encoding" or "connection"
+                    or "proxy-connection" or "proxy-authorization" or "upgrade" or "expect" or "te" or "trailer")
+                {
+                    throw new ArgumentException("Download headers cannot override routing or connection framing", nameof(headers));
+                }
+
+                try { request.Headers.Add(headerName, headerValue); }
+                catch (Exception error) when (error is FormatException or InvalidOperationException)
+                {
+                    throw new ArgumentException("Invalid download header", nameof(headers));
+                }
+            }
+        }
         using var response = await _httpClient.SendAsync(
             request,
             HttpCompletionOption.ResponseHeadersRead,
@@ -359,8 +421,17 @@ public sealed class AssetStore : IDisposable
         var mediaType = response.Content.Headers.ContentType?.MediaType;
         var name = suggestedName ?? GetRemoteName(uri, response.Content.Headers.ContentDisposition);
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        var asset = await StoreAsync(stream, name, mediaType, cancellationToken).ConfigureAwait(false);
-        return asset with { Source = AssetSource.Remote(uri.AbsoluteUri) };
+        var asset = await StoreAsync(stream, name, mediaType, expectedSha256, cancellationToken).ConfigureAwait(false);
+        return asset with { Source = HasDownloadGrantQuery(uri) ? AssetSource.Inline : AssetSource.Remote(uri.AbsoluteUri) };
+    }
+
+    private static void ValidateExpectedSha256(string? expectedSha256)
+    {
+        if (expectedSha256 is not null && (expectedSha256.Length != 64
+            || expectedSha256.Any(character => character is not (>= '0' and <= '9' or >= 'a' and <= 'f'))))
+        {
+            throw new ArgumentException("The expected SHA256 checksum must be 64 lowercase hexadecimal characters", nameof(expectedSha256));
+        }
     }
 
     private static SocketsHttpHandler CreateHttpHandler() => new()
@@ -582,4 +653,11 @@ public sealed class AssetTooLargeException(long maximumByteCount)
     : IOException($"The asset exceeds the configured limit of {maximumByteCount} bytes.")
 {
     public long MaximumByteCount { get; } = maximumByteCount;
+}
+
+public sealed class AssetChecksumMismatchException(string expectedSha256, string actualSha256)
+    : IOException("File SHA256 checksum does not match")
+{
+    public string ExpectedSha256 { get; } = expectedSha256;
+    public string ActualSha256 { get; } = actualSha256;
 }

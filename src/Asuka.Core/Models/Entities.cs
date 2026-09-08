@@ -69,7 +69,8 @@ public sealed record Group
         int level = 1,
         int maxMemberCount = 200,
         bool wholeMuted = false,
-        DateTimeOffset? createdAt = null)
+        DateTimeOffset? createdAt = null,
+        bool anonymousEnabled = false)
     {
         Id = id ?? IdGenerator.GroupId();
         Name = name;
@@ -78,6 +79,7 @@ public sealed record Group
         Level = level;
         MaxMemberCount = maxMemberCount;
         WholeMuted = wholeMuted;
+        AnonymousEnabled = anonymousEnabled;
         CreatedAt = createdAt ?? DateTimeOffset.UtcNow;
     }
 
@@ -88,6 +90,7 @@ public sealed record Group
     public int Level { get; init; }
     public int MaxMemberCount { get; init; }
     public bool WholeMuted { get; init; }
+    public bool AnonymousEnabled { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
 }
 
@@ -172,6 +175,7 @@ internal static class EnumStorage
         RequestKind.Friend => "friend",
         RequestKind.GroupJoin => "groupJoin",
         RequestKind.GroupInvite => "groupInvite",
+        RequestKind.GroupInvitedJoin => "groupInvitedJoin",
         _ => throw new ArgumentOutOfRangeException(nameof(value)),
     };
 

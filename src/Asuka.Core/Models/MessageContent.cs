@@ -51,17 +51,23 @@ public sealed record TextSegment(string Text) : MessageSegment
     public override string TextPreview => Text;
 }
 
+/// <summary>Send-only anonymous intent. Identity exposure requires an explicit fallback opt-in.</summary>
+public sealed record AnonymousSegment(bool Ignore = false) : MessageSegment
+{
+    public override string TextPreview => string.Empty;
+}
+
 public sealed record MentionSegment(string? UserId) : MessageSegment
 {
     public override string TextPreview => UserId is null ? "@everyone" : $"@{UserId}";
 }
 
-public sealed record FaceSegment(string Id, string? Name = null) : MessageSegment
+public sealed record FaceSegment(string Id, string? Name = null, bool IsLarge = false) : MessageSegment
 {
     public override string TextPreview => Name is null ? "[Emoji]" : $"[{Name}]";
 }
 
-public sealed record ImageSegment(Asset Asset) : MessageSegment
+public sealed record ImageSegment(Asset Asset, string SubType = "normal", string? Summary = null) : MessageSegment
 {
     public override string TextPreview => "[Image]";
 }
@@ -71,7 +77,17 @@ public sealed record RecordSegment(Asset Asset, TimeSpan? Duration = null) : Mes
     public override string TextPreview => "[Voice]";
 }
 
-public sealed record VideoSegment(Asset Asset) : MessageSegment
+public sealed record AudioSegment(Asset Asset) : MessageSegment
+{
+    public override string TextPreview => "[Audio]";
+}
+
+public sealed record LocationSegment(double Latitude, double Longitude, string Title, string Content) : MessageSegment
+{
+    public override string TextPreview => $"[Location: {Title}]";
+}
+
+public sealed record VideoSegment(Asset Asset, Asset? Thumbnail = null) : MessageSegment
 {
     public override string TextPreview => "[Video]";
 }
@@ -81,7 +97,7 @@ public sealed record FileSegment(Asset Asset) : MessageSegment
     public override string TextPreview => $"[File: {Asset.Name}]";
 }
 
-public sealed record ReplySegment(string MessageId) : MessageSegment
+public sealed record ReplySegment(string MessageId, string? UserId = null) : MessageSegment
 {
     public override string TextPreview => string.Empty;
 }
@@ -93,6 +109,12 @@ public sealed record PokeSegment(string? UserId) : MessageSegment
 
 public sealed record ForwardNode
 {
+    [JsonConstructor]
+    public ForwardNode(string senderId, string senderName, IReadOnlyList<MessageSegment> content, string id, DateTimeOffset time)
+        : this(senderId, senderName, (IEnumerable<MessageSegment>)content, id, (DateTimeOffset?)time)
+    {
+    }
+
     public ForwardNode(
         string senderId,
         string senderName,
@@ -114,7 +136,13 @@ public sealed record ForwardNode
     public IReadOnlyList<MessageSegment> Content { get; init; }
 }
 
-public sealed record ForwardSegment(string Id, IReadOnlyList<ForwardNode> Nodes) : MessageSegment
+public sealed record ForwardSegment(
+    string Id,
+    IReadOnlyList<ForwardNode> Nodes,
+    string? Title = null,
+    string? Summary = null,
+    IReadOnlyList<string>? Preview = null,
+    string? Prompt = null) : MessageSegment
 {
     public override string TextPreview => "[Forwarded messages]";
 }
@@ -149,19 +177,28 @@ internal sealed class MessageSegmentJsonConverter : JsonConverter<MessageSegment
         return type switch
         {
             "text" => new TextSegment(GetString(root, "text") ?? string.Empty),
+            "anonymous" => new AnonymousSegment(root.TryGetProperty("ignore", out var ignore) && ignore.GetBoolean()),
             "mention" => new MentionSegment(GetString(root, "user_id")),
-            "face" => new FaceSegment(GetString(root, "id") ?? string.Empty, GetString(root, "name")),
-            "image" => new ImageSegment(GetAsset(root, options)),
+            "face" => new FaceSegment(GetString(root, "id") ?? string.Empty, GetString(root, "name"),
+                root.TryGetProperty("is_large", out var large) && large.GetBoolean()),
+            "image" => new ImageSegment(GetAsset(root, options), GetString(root, "sub_type") ?? "normal", GetString(root, "summary")),
             "record" => new RecordSegment(GetAsset(root, options), GetDuration(root)),
-            "video" => new VideoSegment(GetAsset(root, options)),
+            "audio" => new AudioSegment(GetAsset(root, options)),
+            "location" => new LocationSegment(root.GetProperty("latitude").GetDouble(), root.GetProperty("longitude").GetDouble(),
+                GetString(root, "title") ?? string.Empty, GetString(root, "content") ?? string.Empty),
+            "video" => new VideoSegment(GetAsset(root, options),
+                root.TryGetProperty("thumbnail", out var thumbnail) ? thumbnail.Deserialize<Asset>(options) : null),
             "file" => new FileSegment(GetAsset(root, options)),
-            "reply" => new ReplySegment(GetString(root, "message_id") ?? string.Empty),
+            "reply" => new ReplySegment(GetString(root, "message_id") ?? string.Empty, GetString(root, "user_id")),
             "poke" => new PokeSegment(GetString(root, "user_id")),
             "forward" => new ForwardSegment(
                 GetString(root, "id") ?? string.Empty,
                 root.TryGetProperty("nodes", out var nodes)
                     ? nodes.Deserialize<IReadOnlyList<ForwardNode>>(options) ?? []
-                    : []),
+                    : [],
+                GetString(root, "title"), GetString(root, "summary"),
+                root.TryGetProperty("preview", out var preview) ? preview.Deserialize<IReadOnlyList<string>>(options) : null,
+                GetString(root, "prompt")),
             "unsupported" => new UnsupportedSegment(
                 GetString(root, "original_type") ?? "unknown",
                 root.TryGetProperty("payload", out var payload) ? new JsonValue(payload) : JsonValue.Null),
@@ -178,6 +215,10 @@ internal sealed class MessageSegmentJsonConverter : JsonConverter<MessageSegment
                 writer.WriteString("type", "text");
                 writer.WriteString("text", text.Text);
                 break;
+            case AnonymousSegment anonymous:
+                writer.WriteString("type", "anonymous");
+                writer.WriteBoolean("ignore", anonymous.Ignore);
+                break;
             case MentionSegment mention:
                 writer.WriteString("type", "mention");
                 WriteOptionalString(writer, "user_id", mention.UserId);
@@ -186,9 +227,12 @@ internal sealed class MessageSegmentJsonConverter : JsonConverter<MessageSegment
                 writer.WriteString("type", "face");
                 writer.WriteString("id", face.Id);
                 WriteOptionalString(writer, "name", face.Name);
+                writer.WriteBoolean("is_large", face.IsLarge);
                 break;
             case ImageSegment image:
                 WriteAsset(writer, "image", image.Asset, options);
+                writer.WriteString("sub_type", image.SubType);
+                WriteOptionalString(writer, "summary", image.Summary);
                 break;
             case RecordSegment record:
                 WriteAsset(writer, "record", record.Asset, options);
@@ -197,8 +241,23 @@ internal sealed class MessageSegmentJsonConverter : JsonConverter<MessageSegment
                     writer.WriteNumber("duration", duration.TotalSeconds);
                 }
                 break;
+            case AudioSegment audio:
+                WriteAsset(writer, "audio", audio.Asset, options);
+                break;
+            case LocationSegment location:
+                writer.WriteString("type", "location");
+                writer.WriteNumber("latitude", location.Latitude);
+                writer.WriteNumber("longitude", location.Longitude);
+                writer.WriteString("title", location.Title);
+                writer.WriteString("content", location.Content);
+                break;
             case VideoSegment video:
                 WriteAsset(writer, "video", video.Asset, options);
+                if (video.Thumbnail is { } thumbnail)
+                {
+                    writer.WritePropertyName("thumbnail");
+                    JsonSerializer.Serialize(writer, thumbnail, options);
+                }
                 break;
             case FileSegment file:
                 WriteAsset(writer, "file", file.Asset, options);
@@ -206,6 +265,7 @@ internal sealed class MessageSegmentJsonConverter : JsonConverter<MessageSegment
             case ReplySegment reply:
                 writer.WriteString("type", "reply");
                 writer.WriteString("message_id", reply.MessageId);
+                WriteOptionalString(writer, "user_id", reply.UserId);
                 break;
             case PokeSegment poke:
                 writer.WriteString("type", "poke");
@@ -216,6 +276,14 @@ internal sealed class MessageSegmentJsonConverter : JsonConverter<MessageSegment
                 writer.WriteString("id", forward.Id);
                 writer.WritePropertyName("nodes");
                 JsonSerializer.Serialize(writer, forward.Nodes, options);
+                WriteOptionalString(writer, "title", forward.Title);
+                WriteOptionalString(writer, "summary", forward.Summary);
+                WriteOptionalString(writer, "prompt", forward.Prompt);
+                if (forward.Preview is { } preview)
+                {
+                    writer.WritePropertyName("preview");
+                    JsonSerializer.Serialize(writer, preview, options);
+                }
                 break;
             case UnsupportedSegment unsupported:
                 writer.WriteString("type", "unsupported");

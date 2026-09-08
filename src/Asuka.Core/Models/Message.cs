@@ -19,7 +19,8 @@ public sealed record Message
         long seq = 0,
         DateTimeOffset? time = null,
         DateTimeOffset? recalledAt = null,
-        string? recalledBy = null)
+        string? recalledBy = null,
+        AnonymousIdentity? anonymous = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(peerId);
         ArgumentException.ThrowIfNullOrWhiteSpace(senderId);
@@ -35,6 +36,7 @@ public sealed record Message
         Direction = direction;
         RecalledAt = recalledAt;
         RecalledBy = recalledBy;
+        Anonymous = anonymous;
     }
 
     public string Id { get; init; }
@@ -48,6 +50,7 @@ public sealed record Message
     public MessageDirection Direction { get; init; }
     public DateTimeOffset? RecalledAt { get; init; }
     public string? RecalledBy { get; init; }
+    public AnonymousIdentity? Anonymous { get; init; }
     public bool IsRecalled => RecalledAt is not null;
     public Chat Chat => new(Scene, PeerId, SelfId);
 }
@@ -57,18 +60,21 @@ public enum RequestKind
     Friend,
     GroupJoin,
     GroupInvite,
+    GroupInvitedJoin,
 }
 
 public enum RequestResolutionStatus
 {
     Accepted,
     Rejected,
+    Ignored,
 }
 
 public sealed record RequestResolution(RequestResolutionStatus Status, string Reason = "")
 {
     public static RequestResolution Accepted { get; } = new(RequestResolutionStatus.Accepted);
     public static RequestResolution Rejected(string reason = "") => new(RequestResolutionStatus.Rejected, reason);
+    public static RequestResolution Ignored { get; } = new(RequestResolutionStatus.Ignored);
 }
 
 public sealed record PendingRequest
@@ -82,7 +88,13 @@ public sealed record PendingRequest
         string? id = null,
         string? flag = null,
         DateTimeOffset? time = null,
-        RequestResolution? resolution = null)
+        RequestResolution? resolution = null,
+        string? targetUserId = null,
+        string? sourceGroupId = null,
+        bool isFiltered = false,
+        string via = "asuka",
+        string? resolvedBy = null,
+        long notificationSequence = 0)
     {
         Id = id ?? IdGenerator.RequestId();
         Flag = flag ?? IdGenerator.Flag();
@@ -93,6 +105,12 @@ public sealed record PendingRequest
         Comment = comment;
         Time = time ?? DateTimeOffset.UtcNow;
         Resolution = resolution;
+        TargetUserId = targetUserId;
+        SourceGroupId = sourceGroupId;
+        IsFiltered = isFiltered;
+        Via = via;
+        ResolvedBy = resolvedBy;
+        NotificationSequence = notificationSequence;
     }
 
     public string Id { get; init; }
@@ -104,6 +122,12 @@ public sealed record PendingRequest
     public string Comment { get; init; }
     public DateTimeOffset Time { get; init; }
     public RequestResolution? Resolution { get; init; }
+    public string? TargetUserId { get; init; }
+    public string? SourceGroupId { get; init; }
+    public bool IsFiltered { get; init; }
+    public string Via { get; init; }
+    public string? ResolvedBy { get; init; }
+    public long NotificationSequence { get; init; }
 }
 
 public sealed record ConversationSummary(Chat Chat, string Title, string? Avatar, Message LastMessage)
@@ -113,5 +137,10 @@ public sealed record ConversationSummary(Chat Chat, string Title, string? Avatar
 }
 
 public sealed record ActiveChat(Chat Chat, Message LastMessage);
+public sealed record MessageReactionState(
+    string MessageId,
+    string UserId,
+    string Reaction,
+    string ReactionType = "face");
 public sealed record FriendInfo(Friendship Friendship, User User);
 public sealed record MemberRosterItem(GroupMember Member, User User);
