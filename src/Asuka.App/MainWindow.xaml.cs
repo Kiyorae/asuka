@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Text.Json;
 using Asuka.Core;
 using Asuka.Protocols;
 using Microsoft.UI.Input;
@@ -29,11 +30,15 @@ public sealed partial class MainWindow : Window
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _inlineConsoleRefreshTimer;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _messageRefreshTimer;
     private readonly ObservableCollection<MentionDraft> _mentions = [];
+    private readonly ObservableCollection<MessageSegment> _richContent = [];
     private readonly Dictionary<string, ComposerDraft> _drafts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _pendingAttachmentImports = new(StringComparer.Ordinal);
     private readonly ObservableCollection<ConversationItem> _visibleConversations = [];
     private readonly HashSet<string> _resolvingRequestFlags = new(StringComparer.Ordinal);
     private readonly HashSet<string> _renderedMessageIds = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, MessageRow> _messageRows = new(StringComparer.Ordinal);
+    private ReplyDraft? _reply;
+    private bool _anonymous;
     private string? _activeDraftKey;
     private CancellationTokenSource? _consoleMotionCancellation;
     private readonly PageNavigationState _navigation = new();
@@ -49,6 +54,9 @@ public sealed partial class MainWindow : Window
     private bool _consoleVisible;
     private bool _currentUserOwnsSelectedGroup;
     private bool _loaded;
+    private readonly TaskCompletionSource _startupReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal Task StartupReady => _startupReady.Task;
+    internal CancellationToken StartupCancellationToken { get; set; }
     private bool? _paneDetailsVisible;
     private bool? _protocolPaneOverlay;
     private bool? _inlineConsoleStacked;
@@ -100,6 +108,7 @@ public sealed partial class MainWindow : Window
         AttachmentList.ItemsSource = _attachments;
         InlineConsoleList.ItemsSource = _inlineConsoleEntries;
         MentionList.ItemsSource = _mentions;
+        RichContentList.ItemsSource = _richContent;
         RefreshMessageVisuals();
         UpdateEnvironmentText();
         environment.PropertyChanged += Environment_PropertyChanged;
@@ -150,6 +159,7 @@ public sealed partial class MainWindow : Window
         ComposerBorder.Drop += Composer_Drop;
         AttachButton.Click += AttachButton_Click;
         MentionButton.Click += MentionButton_Click;
+        AnonymousButton.Click += AnonymousButton_Click;
         RemoveAttachmentButton.Click += RemoveAttachment_Click;
         RemoveMentionButton.Click += RemoveMention_Click;
         ComposerTextBox.TextChanged += ComposerTextBox_TextChanged;
@@ -192,12 +202,12 @@ public sealed partial class MainWindow : Window
         InstallKeyboardAccelerators();
         try
         {
-            await _environment.InitializeAsync();
-            if (_closed) return;
+            await _environment.InitializeAsync(StartupCancellationToken);
+            if (_closed || StartupCancellationToken.IsCancellationRequested) return;
             ActivityLogsPage.Initialize(_environment, this);
             SettingsPageHost.Initialize(_environment, this);
             await RefreshSelectedGroupAuthorityAsync();
-            if (_closed) return;
+            if (_closed || StartupCancellationToken.IsCancellationRequested) return;
             ApplyTheme();
             RefreshConversationFilter();
             UpdateChatState();
@@ -205,7 +215,7 @@ public sealed partial class MainWindow : Window
             RefreshInlineConsole();
             UpdatePanePresentation();
             UpdateUtilityPanels();
-            if (!_pageTransitionRunning && _navigation.Revision == 0)
+            if (!StartupCancellationToken.CanBeCanceled && !_pageTransitionRunning && _navigation.Revision == 0)
             {
                 var motionToken = RestartMotion(ref _pageMotionCancellation);
                 await Task.WhenAll(
@@ -220,17 +230,24 @@ public sealed partial class MainWindow : Window
                         TimeSpan.FromMilliseconds(200),
                         cancellationToken: motionToken));
             }
+            StartShowcasePlayback();
+        }
+        catch (OperationCanceledException) when (StartupCancellationToken.IsCancellationRequested)
+        {
         }
         catch (Exception exception)
         {
             if (!_closed) ShowError(exception);
         }
+        finally { _startupReady.TrySetResult(); }
     }
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)
     {
         _environment.AddLog("Lifecycle", "Window closing", "The main workspace is closing.");
         _closed = true;
+        if (!_loaded) _startupReady.TrySetCanceled();
+        DisposeShowcasePlayback();
         AppNavigationView.UnregisterPropertyChangedCallback(
             NavigationView.IsPaneOpenProperty, _paneOpenChangedToken);
         WorkspaceLayout.SizeChanged -= WorkspaceLayout_SizeChanged;
@@ -307,6 +324,11 @@ public sealed partial class MainWindow : Window
 
     private async Task RunConnectionOperationAsync(bool retry)
     {
+        if (_environment.IsShowcaseMode)
+        {
+            ToggleShowcasePlayback();
+            return;
+        }
         if (Interlocked.Exchange(ref _connectionInProgress, 1) != 0)
         {
             return;
@@ -373,7 +395,11 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception exception)
         {
-            if (!_closed && requestVersion == _conversationNavigationVersion) ShowError(exception);
+            if (!_closed && requestVersion == _conversationNavigationVersion)
+            {
+                ConversationList.SelectedItem = CurrentConversation();
+                ShowError(exception);
+            }
         }
     }
 
@@ -560,7 +586,7 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
-            var dialog = new GroupManagementDialog(_environment, group, persona)
+            using var dialog = new GroupManagementDialog(_environment, group, persona)
             {
                 XamlRoot = RootGrid.XamlRoot,
             };
@@ -1080,6 +1106,9 @@ public sealed partial class MainWindow : Window
         var text = ComposerTextBox.Text;
         var attachments = _attachments.ToArray();
         var mentions = _mentions.ToArray();
+        var reply = _reply;
+        var richContent = _richContent.ToArray();
+        var anonymous = _anonymous;
         try
         {
             if (chat is null || draftKey is null || senderId is null)
@@ -1092,12 +1121,12 @@ public sealed partial class MainWindow : Window
                 throw new InvalidOperationException("Wait for pending attachment imports to finish before sending.");
             }
 
-            if (string.IsNullOrWhiteSpace(text) && attachments.Length == 0 && mentions.Length == 0)
+            if (string.IsNullOrWhiteSpace(text) && attachments.Length == 0 && mentions.Length == 0 && richContent.Length == 0)
             {
                 throw new InvalidOperationException("Enter a message, mention someone, or attach a file first.");
             }
 
-            _drafts[draftKey] = new ComposerDraft(text, mentions, attachments);
+            _drafts[draftKey] = new ComposerDraft(text, mentions, attachments, reply, richContent, anonymous);
             UpdateChatState();
             FluentMotion.Pulse(SendButtonIcon, 1.2f, -8f);
             if (mentions.Length > 0)
@@ -1124,6 +1153,18 @@ public sealed partial class MainWindow : Window
 
             EnsureDraftContextIsCurrent(draftKey, chat.Id);
             var segments = new List<MessageSegment>();
+            if (anonymous)
+            {
+                if (!_environment.Capabilities.SupportsAnonymous(chat.Scene))
+                {
+                    throw new InvalidOperationException("Anonymous messages are only available in OneBot V11 group conversations.");
+                }
+                segments.Add(new AnonymousSegment(Ignore: false));
+            }
+            if (reply is not null)
+            {
+                segments.Add(new ReplySegment(reply.MessageId, reply.SenderId));
+            }
             segments.AddRange(mentions.Select(mention => mention.ToSegment()));
             if (!string.IsNullOrWhiteSpace(text))
             {
@@ -1131,6 +1172,7 @@ public sealed partial class MainWindow : Window
             }
 
             segments.AddRange(attachments.Select(attachment => attachment.ToSegment()));
+            segments.AddRange(richContent);
             await _environment.SendSegmentsAsync(segments);
             _drafts.Remove(draftKey);
             if (string.Equals(_activeDraftKey, draftKey, StringComparison.Ordinal)
@@ -1139,6 +1181,9 @@ public sealed partial class MainWindow : Window
                 ComposerTextBox.Text = string.Empty;
                 _attachments.Clear();
                 _mentions.Clear();
+                _reply = null;
+                _richContent.Clear();
+                _anonymous = false;
 
                 ComposerTextBox.Focus(FocusState.Programmatic);
                 FluentMotion.Pulse(ComposerPulseHost, 1.006f);
@@ -1154,6 +1199,19 @@ public sealed partial class MainWindow : Window
             Volatile.Write(ref _sendInProgress, 0);
             UpdateChatState();
         }
+    }
+
+    private void AnonymousButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_environment.CanCompose && Volatile.Read(ref _sendInProgress) == 0
+            && _environment.SelectedChat is { } chat && _environment.Capabilities.SupportsAnonymous(chat.Scene)
+            && _activeDraftKey is not null && string.Equals(_activeDraftKey, GetCurrentDraftKey(), StringComparison.Ordinal))
+        {
+            _anonymous = AnonymousButton.IsChecked == true;
+            SaveActiveDraft();
+        }
+        UpdateChatState();
+        UpdateEnvironmentText();
     }
 
     private async void AttachButton_Click(object sender, RoutedEventArgs e)
@@ -1258,7 +1316,11 @@ public sealed partial class MainWindow : Window
                 SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
                 ViewMode = PickerViewMode.List,
             };
-            picker.FileTypeFilter.Add("*");
+            foreach (var extension in _environment.Capabilities.Files ? new[] { "*" }
+                : new[] { ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".mp4", ".mov", ".mkv", ".mp3", ".wav", ".ogg", ".m4a", ".amr", ".silk" })
+            {
+                picker.FileTypeFilter.Add(extension);
+            }
             InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
             var files = await picker.PickMultipleFilesAsync();
             await AddAttachmentsAsync(files.OfType<StorageFile>(), draftKey);
@@ -1326,7 +1388,15 @@ public sealed partial class MainWindow : Window
         {
             foreach (var file in files)
             {
+                if (!_environment.SupportsMessageAttachment(file))
+                {
+                    throw new InvalidOperationException("The selected protocol supports media attachments only.");
+                }
                 var attachment = await _environment.CreateAttachmentAsync(file);
+                if (!_environment.Capabilities.SupportsSegment(attachment.ToSegment()))
+                {
+                    throw new InvalidOperationException("The selected protocol supports media attachments only.");
+                }
                 AddAttachmentToDraft(draftKey, attachment);
             }
 
@@ -1524,6 +1594,7 @@ public sealed partial class MainWindow : Window
             {
                 ImageSegment image => image.Asset,
                 RecordSegment record => record.Asset,
+                AudioSegment audio => audio.Asset,
                 VideoSegment video => video.Asset,
                 FileSegment file => file.Asset,
                 _ => null,
@@ -1614,7 +1685,7 @@ public sealed partial class MainWindow : Window
                 : await _environment.Store.GetMemberAsync(item.Chat.PeerId, currentPersona.Id);
             if (membership?.Role != GroupRole.Owner)
             {
-                ShowErrorMessage("Only the group owner can remove this group.");
+                ShowErrorMessage("Only the group owner can disband this group.");
                 return;
             }
         }
@@ -1626,13 +1697,15 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            var entityName = item.Chat.Scene == ChatScene.Group ? "group" : "friendship";
+            var isGroup = item.Chat.Scene == ChatScene.Group;
             var confirm = new ContentDialog
             {
                 XamlRoot = RootGrid.XamlRoot,
-                Title = $"Remove {entityName}?",
-                Content = $"This will remove {item.Title}. Group deletion also removes its member roster and group history.",
-                PrimaryButtonText = "Remove",
+                Title = isGroup ? "Disband group?" : "Remove friendship?",
+                Content = isGroup
+                    ? $"This will disband {item.Title}, removing its members and messages. Group notifications and resolved request history are retained."
+                    : $"This will remove the friendship with {item.Title}.",
+                PrimaryButtonText = isGroup ? "Disband" : "Remove",
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Close,
             };
@@ -1678,7 +1751,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        if (!_resolvingRequestFlags.Add(item.Request.Flag)) return;
+        if (!_resolvingRequestFlags.Add(item.Request.Id)) return;
         try
         {
             await _environment.ResolveRequestAsync(item.Request, approve, approve ? string.Empty : "Declined in Asuka");
@@ -1689,7 +1762,7 @@ public sealed partial class MainWindow : Window
         }
         finally
         {
-            _resolvingRequestFlags.Remove(item.Request.Flag);
+            _resolvingRequestFlags.Remove(item.Request.Id);
         }
     }
 
@@ -1705,6 +1778,9 @@ public sealed partial class MainWindow : Window
         ApplyTheme();
         RestoreDraftForCurrentContext();
         UpdateEnvironmentText();
+        RefreshMessageVisuals();
+        UpdatePendingRequests();
+        UpdateChatState();
         await RefreshSelectedGroupAuthorityAsync();
     }
 
@@ -1821,11 +1897,13 @@ public sealed partial class MainWindow : Window
 
     private void RefreshMessagesAfterCollectionChange()
     {
+        var hasNewMessages = _environment.Messages.Any(item => !_renderedMessageIds.Contains(item.Id));
         RefreshMessageVisuals();
         UpdateChatState();
-        if (MessageList.Items.Count > 0)
+        if (hasNewMessages && MessageList.Items.Count > 0)
         {
-            MessageList.ScrollIntoView(MessageList.Items[MessageList.Items.Count - 1], ScrollIntoViewAlignment.Leading);
+            if (_environment.IsShowcaseMode) FollowShowcaseMessages();
+            else MessageList.ScrollIntoView(MessageList.Items[MessageList.Items.Count - 1], ScrollIntoViewAlignment.Leading);
         }
     }
 
@@ -1833,41 +1911,72 @@ public sealed partial class MainWindow : Window
     {
         var animateNewItems = _loaded && _navigation.CurrentPage == "messages";
         var newContainers = new List<ListViewItem>();
-        MessageList.Items.Clear();
+        var activeIds = _environment.Messages.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var removedId in _messageRows.Keys.Where(id => !activeIds.Contains(id)).ToArray())
+        {
+            MessageList.Items.Remove(_messageRows[removedId].Container);
+            _messageRows.Remove(removedId);
+        }
+
+        var position = 0;
         foreach (var item in _environment.Messages)
         {
-            var meta = new TextBlock
+            var quotes = item.Message.Content.OfType<ReplySegment>().Select(reply =>
             {
-                Text = item.Meta,
-                Opacity = 0.62,
-                HorizontalAlignment = item.MetaAlignment,
-            };
-            var bubble = new Border
+                var target = _environment.Messages.FirstOrDefault(message => message.Id == reply.MessageId);
+                return new { reply.MessageId, Available = target is not null, Sender = target?.Sender, Text = target?.Text, Recalled = target?.Message.IsRecalled };
+            });
+            var key = new MessageRenderKey(JsonSerializer.Serialize(item.Message.Content),
+                item.Message.IsRecalled, item.Alignment, _environment.Preferences.Protocol, JsonSerializer.Serialize(quotes));
+            if (!_messageRows.TryGetValue(item.Id, out var row) || row.Key != key)
             {
-                Background = item.BubbleBrush,
-                CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(12, 8, 12, 8),
-                Child = BuildMessageContent(item),
-            };
-            var panel = new StackPanel
-            {
-                MaxWidth = 720,
-                HorizontalAlignment = item.Alignment,
-                Spacing = 3,
-            };
-            panel.Children.Add(meta);
-            panel.Children.Add(bubble);
-            var container = new ListViewItem
-            {
-                Tag = item,
-                Content = panel,
-                HorizontalContentAlignment = HorizontalAlignment.Stretch,
-                Padding = new Thickness(0),
-                Margin = new Thickness(0, 3, 0, 3),
-            };
+                if (row is not null) MessageList.Items.Remove(row.Container);
+                var reactions = new StackPanel();
+                var body = new StackPanel
+                {
+                    Spacing = 6,
+                    RequestedTheme = item.UseDefaultForeground ? ElementTheme.Default : ElementTheme.Dark,
+                };
+                body.Children.Add(BuildMessageContent(item));
+                body.Children.Add(reactions);
+                var panel = new StackPanel { MaxWidth = 720, HorizontalAlignment = item.Alignment, Spacing = 3 };
+                var meta = new TextBlock { Text = item.Meta, Opacity = 0.62, HorizontalAlignment = item.MetaAlignment };
+                panel.Children.Add(meta);
+                panel.Children.Add(new Border
+                {
+                    Background = item.BubbleBrush,
+                    CornerRadius = new CornerRadius(12),
+                    Padding = new Thickness(12, 8, 12, 8),
+                    Child = body,
+                });
+                row = new MessageRow(new ListViewItem
+                {
+                    Content = panel,
+                    HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                    Padding = new Thickness(0),
+                    Margin = new Thickness(0, 3, 0, 3),
+                }, key, reactions, meta);
+                _messageRows[item.Id] = row;
+            }
+
+            var container = row.Container;
+            row.Meta.Text = item.Meta;
+            container.Tag = item;
             container.ContextFlyout = CreateMessageContextFlyout(container, item);
             AutomationProperties.SetName(container, item.AccessibilityLabel);
-            MessageList.Items.Add(container);
+            row.Reactions.Children.Clear();
+            if (!item.Message.IsRecalled && item.Reactions.Count > 0 && _environment.Capabilities.SupportsReactions(item.Message.Scene))
+            {
+                row.Reactions.Children.Add(CreateReactionBar(item));
+            }
+
+            if (position >= MessageList.Items.Count || !ReferenceEquals(MessageList.Items[position], container))
+            {
+                MessageList.Items.Remove(container);
+                MessageList.Items.Insert(position, container);
+            }
+
+            position++;
             if (animateNewItems && !_renderedMessageIds.Contains(item.Id))
             {
                 newContainers.Add(container);
@@ -1901,68 +2010,82 @@ public sealed partial class MainWindow : Window
 
     private UIElement BuildMessageContent(MessageItem item)
     {
+        var foreground = item.UseDefaultForeground ? null : item.ForegroundBrush;
         if (item.Message.IsRecalled)
         {
-            return new TextBlock
+            var recalled = new TextBlock
             {
                 Text = item.Text,
                 FontStyle = Windows.UI.Text.FontStyle.Italic,
-                Opacity = 0.72,
+                Opacity = foreground is null ? 0.72 : 1,
             };
+            if (foreground is not null) recalled.Foreground = foreground;
+            return recalled;
         }
 
         var content = new StackPanel { Spacing = 6 };
-        foreach (var segment in item.Message.Content)
+        foreach (var reply in item.Message.Content.OfType<ReplySegment>())
         {
-            content.Children.Add(BuildSegmentContent(segment));
+            content.Children.Add(CreateReplyPreview(reply, foreground));
+        }
+        foreach (var segment in item.Message.Content.Where(segment => segment is not ReplySegment))
+        {
+            content.Children.Add(BuildSegmentContent(segment, foreground));
         }
 
         return content;
     }
 
-    private UIElement BuildSegmentContent(MessageSegment segment) => segment switch
+    private UIElement BuildSegmentContent(MessageSegment segment, Brush? foreground = null) => segment switch
     {
-        TextSegment text => new TextBlock
-        {
-            Text = text.Text,
-            TextWrapping = TextWrapping.Wrap,
-            IsTextSelectionEnabled = true,
-        },
-        MentionSegment mention => CreateSegmentBadge(mention.UserId is null ? "@everyone" : $"@{mention.UserId}"),
-        FaceSegment face => CreateSegmentBadge(face.Name is null ? $"Emoji {face.Id}" : face.Name),
-        ImageSegment image => CreateImagePreview(image.Asset),
-        RecordSegment record => CreateAssetButton(record.Asset, $"Play audio · {record.Asset.Name}"),
-        VideoSegment video => CreateAssetButton(video.Asset, $"Open video · {video.Asset.Name}"),
+        TextSegment text => MessageTextRenderer.Render(text.Text, foreground),
+        MentionSegment mention => CreateSegmentBadge(mention.UserId is null ? "@everyone" : $"@{mention.UserId}", foreground),
+        FaceSegment face => CreateSegmentBadge(face.Name is null ? $"Emoji {face.Id}" : face.Name, foreground),
+        ImageSegment image => CreateImagePreview(image.Asset, foreground),
+        RecordSegment record => CreateAudioPreview(record.Asset),
+        AudioSegment audio => CreateAudioPreview(audio.Asset),
+        LocationSegment location => CreateQuotedText($"{location.Title}\n{location.Content}\n{location.Latitude:0.######}, {location.Longitude:0.######}", foreground),
+        VideoSegment video => CreateVideoPreview(video),
         FileSegment file => CreateAssetButton(file.Asset, $"Open file · {file.Asset.Name}"),
-        ReplySegment reply => CreateQuotedText($"Reply to message {reply.MessageId}"),
-        PokeSegment poke => CreateSegmentBadge(poke.UserId is null ? "Nudge" : $"Nudge {poke.UserId}"),
-        ForwardSegment forward => CreateForwardPreview(forward),
-        UnsupportedSegment unsupported => CreateQuotedText($"Unsupported segment: {unsupported.Type}"),
-        _ => CreateQuotedText(segment.TextPreview),
+        ReplySegment reply => CreateReplyPreview(reply, foreground),
+        PokeSegment poke => CreateSegmentBadge(poke.UserId is null ? "Nudge" : $"Nudge {poke.UserId}", foreground),
+        ForwardSegment forward => CreateForwardPreview(forward, foreground),
+        UnsupportedSegment unsupported => CreateQuotedText($"Unsupported segment: {unsupported.Type}", foreground),
+        _ => CreateQuotedText(segment.TextPreview, foreground),
     };
 
-    private static Border CreateSegmentBadge(string text) => new()
+    private static Border CreateSegmentBadge(string text, Brush? foreground = null)
     {
-        HorizontalAlignment = HorizontalAlignment.Left,
-        Padding = new Thickness(7, 3, 7, 3),
-        CornerRadius = new CornerRadius(7),
-        Background = new SolidColorBrush(Windows.UI.Color.FromArgb(30, 80, 140, 240)),
-        Child = new TextBlock { Text = text },
-    };
+        var label = new TextBlock { Text = text };
+        if (foreground is not null) label.Foreground = foreground;
+        return new Border
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(7, 3, 7, 3),
+            CornerRadius = new CornerRadius(7),
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(30, 80, 140, 240)),
+            Child = label,
+        };
+    }
 
-    private static Border CreateQuotedText(string text) => new()
+    private static Border CreateQuotedText(string text, Brush? foreground = null)
     {
-        Padding = new Thickness(9, 6, 9, 6),
-        BorderThickness = new Thickness(3, 0, 0, 0),
-        BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(180, 80, 140, 240)),
-        Child = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, Opacity = 0.75 },
-    };
+        var label = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, Opacity = foreground is null ? 0.75 : 1 };
+        if (foreground is not null) label.Foreground = foreground;
+        return new Border
+        {
+            Padding = new Thickness(9, 6, 9, 6),
+            BorderThickness = new Thickness(3, 0, 0, 0),
+            BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(180, 80, 140, 240)),
+            Child = label,
+        };
+    }
 
-    private UIElement CreateImagePreview(Asset asset)
+    private UIElement CreateImagePreview(Asset asset, Brush? foreground = null)
     {
         if (!_environment.Assets.Exists(asset.Id))
         {
-            return CreateQuotedText($"Image unavailable · {asset.Name}");
+            return CreateQuotedText($"Image unavailable · {asset.Name}", foreground);
         }
 
         var image = new Image
@@ -1971,7 +2094,7 @@ public sealed partial class MainWindow : Window
             MaxHeight = 260,
             HorizontalAlignment = HorizontalAlignment.Left,
             Stretch = Stretch.Uniform,
-            Source = new BitmapImage(new Uri(_environment.Assets.LocationOf(asset.Id))),
+            Source = new BitmapImage(new Uri(_environment.Assets.LocationOf(asset.Id))) { AutoPlay = true },
         };
         AutomationProperties.SetName(image, $"Image attachment {asset.Name}");
         var panel = new StackPanel { Spacing = 4 };
@@ -1999,16 +2122,18 @@ public sealed partial class MainWindow : Window
         return button;
     }
 
-    private static Expander CreateForwardPreview(ForwardSegment forward)
+    private static Expander CreateForwardPreview(ForwardSegment forward, Brush? foreground = null)
     {
         var nodes = new StackPanel { Spacing = 5 };
         foreach (var node in forward.Nodes)
         {
-            nodes.Children.Add(new TextBlock
+            var label = new TextBlock
             {
                 Text = $"{node.SenderName}: {node.Content.TextPreview()}",
                 TextWrapping = TextWrapping.Wrap,
-            });
+            };
+            if (foreground is not null) label.Foreground = foreground;
+            nodes.Children.Add(label);
         }
 
         return new Expander
@@ -2027,7 +2152,28 @@ public sealed partial class MainWindow : Window
                 throw new FileNotFoundException("The attachment is not available in the local asset cache.", asset.Name);
             }
 
-            var file = await StorageFile.GetFileFromPathAsync(_environment.Assets.LocationOf(asset.Id));
+            using var cacheLease = await MediaService.AcquireCacheLeaseAsync();
+            if (_closed) return;
+            var source = _environment.Assets.LocationOf(asset.Id);
+            var directory = Path.Combine(Path.GetTempPath(), "Asuka", "attachment-preview", asset.Id);
+            Directory.CreateDirectory(directory);
+            var invalid = Path.GetInvalidFileNameChars();
+            var name = new string(asset.Name.Select(character => invalid.Contains(character) ? '_' : character).ToArray()).TrimEnd(' ', '.');
+            if (string.IsNullOrWhiteSpace(name)) name = "attachment.bin";
+            if (name.Length > 220)
+            {
+                var extension = Path.GetExtension(name);
+                var stem = Path.GetFileNameWithoutExtension(name);
+                name = stem[..Math.Min(stem.Length, 200)] + extension[..Math.Min(extension.Length, 16)];
+            }
+            // A prefix avoids Windows device names and leaves the extension usable by the shell.
+            var preview = Path.Combine(directory, "Asuka-" + name);
+            await using (var input = File.OpenRead(source))
+            await using (var output = File.Create(preview))
+                await input.CopyToAsync(output);
+            if (_closed) return;
+            var file = await StorageFile.GetFileFromPathAsync(preview);
+            if (_closed) return;
             if (!await Launcher.LaunchFileAsync(file))
             {
                 throw new InvalidOperationException("Windows could not find an app that can open this attachment.");
@@ -2051,7 +2197,8 @@ public sealed partial class MainWindow : Window
             && (query.Length == 0 || item.Title.Contains(query, StringComparison.OrdinalIgnoreCase)
                 || item.Preview.Contains(query, StringComparison.OrdinalIgnoreCase)
                 || item.DisplayId.Contains(query, StringComparison.OrdinalIgnoreCase)
-                || item.Chat.PeerId.Contains(query, StringComparison.OrdinalIgnoreCase))).ToList();
+                || item.Chat.PeerId.Contains(query, StringComparison.OrdinalIgnoreCase)))
+            .OrderByDescending(item => item.IsPinned).ToList();
         CollectionSync.Apply(_visibleConversations, items);
         ConversationList.SelectedItem = items.FirstOrDefault(item => item.Id == selectedId);
         var groups = _environment.Conversations.Count(item => item.Chat.Scene == ChatScene.Group);
@@ -2071,7 +2218,11 @@ public sealed partial class MainWindow : Window
         var count = _environment.PendingRequests.Count;
         PendingRequestsSummary.Text = count == 0 ? "No pending requests" : $"{count} pending requests";
         PendingRequestsExpander.Header = $"Pending requests ({count})";
-        PendingRequestsExpander.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        PendingRequestsExpander.Visibility = count > 0 && _environment.Capabilities.Requests
+            ? Visibility.Visible : Visibility.Collapsed;
+        PendingRequestsSummary.Visibility = _environment.Capabilities.Requests ? Visibility.Visible : Visibility.Collapsed;
+        SimulateRequestMenuItem.Visibility = _environment.Capabilities.Requests ? Visibility.Visible : Visibility.Collapsed;
+        RequestHistoryButton.Visibility = _environment.Capabilities.Requests ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private ConversationItem? SelectedConversation() => ConversationList.SelectedItem switch
@@ -2108,7 +2259,8 @@ public sealed partial class MainWindow : Window
         };
         recall.Click += (_, _) => { SelectTarget(); RecallMessage_Click(recall, new RoutedEventArgs()); };
         flyout.Items.Add(copy); flyout.Items.Add(copyId); flyout.Items.Add(recall);
-        if (item.Message.Content.Any(segment => segment is ImageSegment or RecordSegment or VideoSegment or FileSegment))
+        AddMessageInteractions(flyout, item);
+        if (!item.Message.IsRecalled && item.Message.Content.Any(segment => segment is ImageSegment or RecordSegment or AudioSegment or VideoSegment or FileSegment))
         {
             flyout.Items.Add(new MenuFlyoutSeparator());
             var open = new MenuFlyoutItem { Text = "Open", Tag = item };
@@ -2142,6 +2294,8 @@ public sealed partial class MainWindow : Window
             CopyText(item.DisplayId);
         };
         flyout.Items.Add(open); flyout.Items.Add(copy);
+        AddConversationActions(flyout, item);
+        AddGroupHonorActions(flyout, item.Chat);
         MenuFlyoutItem? manage = null;
         if (item.Chat.Scene == ChatScene.Group)
         {
@@ -2163,7 +2317,7 @@ public sealed partial class MainWindow : Window
         flyout.Items.Add(new MenuFlyoutSeparator());
         var remove = new MenuFlyoutItem
         {
-            Text = "Remove friend or group",
+            Text = item.Chat.Scene == ChatScene.Group ? "Disband group" : "Remove friendship",
             Tag = item,
             IsEnabled = item.Chat.Scene == ChatScene.Friend,
         };
@@ -2207,16 +2361,38 @@ public sealed partial class MainWindow : Window
 
     private void UpdateChatState()
     {
+        GroupNotificationsButton.Visibility = _environment.Capabilities.GroupNotifications ? Visibility.Visible : Visibility.Collapsed;
         var canCompose = _environment.CanCompose && Volatile.Read(ref _sendInProgress) == 0;
         var hasDraftContent = !string.IsNullOrWhiteSpace(ComposerTextBox.Text)
             || _mentions.Count > 0
-            || _attachments.Count > 0;
+            || _attachments.Count > 0
+            || _richContent.Count > 0;
         var hasPendingImport = HasPendingAttachmentImport(_activeDraftKey);
         EmptyChatState.Visibility = _environment.SelectedChat is null ? Visibility.Visible : Visibility.Collapsed;
         ComposerBorder.Opacity = canCompose ? 1 : 0.65;
         ComposerTextBox.IsEnabled = canCompose;
         AttachButton.IsEnabled = canCompose;
+        AttachButton.Text = _environment.Capabilities.Files ? "Attach file" : "Attach media";
+        FaceButton.Visibility = _environment.Capabilities.Faces ? Visibility.Visible : Visibility.Collapsed;
+        CustomFacesButton.Visibility = _environment.Capabilities.CustomFaces ? Visibility.Visible : Visibility.Collapsed;
+        CustomFacesButton.IsEnabled = canCompose;
+        LocationButton.Visibility = _environment.Capabilities.Locations ? Visibility.Visible : Visibility.Collapsed;
+        AudioFileButton.Visibility = _environment.Capabilities.Audio ? Visibility.Visible : Visibility.Collapsed;
+        FaceButton.IsEnabled = canCompose;
+        LocationButton.IsEnabled = canCompose;
+        AudioFileButton.IsEnabled = canCompose;
+        RichContentRow.Visibility = _richContent.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        RemoveRichContentButton.IsEnabled = canCompose && _richContent.Count > 0;
         MentionButton.IsEnabled = canCompose && _environment.SelectedChat?.Scene == ChatScene.Group;
+        MentionButton.Visibility = _environment.SelectedChat?.Scene == ChatScene.Group ? Visibility.Visible : Visibility.Collapsed;
+        var supportsAnonymous = _environment.SelectedChat is { } selectedChat
+            && _environment.Capabilities.SupportsAnonymous(selectedChat.Scene);
+        AnonymousButton.Visibility = supportsAnonymous ? Visibility.Visible : Visibility.Collapsed;
+        AnonymousButton.IsEnabled = canCompose && supportsAnonymous;
+        AnonymousButton.IsChecked = IsAnonymousDraftActive();
+        UpdateSendingIdentityText();
+        ReplyBanner.IsOpen = _reply is not null;
+        ReplyBanner.Message = _reply is { } reply ? $"{reply.Sender}: {reply.Preview}" : string.Empty;
         RemoveMentionButton.IsEnabled = canCompose && _mentions.Count > 0;
         RemoveMentionButton.Visibility = _mentions.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         RemoveAttachmentButton.IsEnabled = canCompose && _attachments.Count > 0;
@@ -2249,15 +2425,33 @@ public sealed partial class MainWindow : Window
         ManageCurrentGroupMenuItem.IsEnabled = _environment.CurrentPersonaBelongsToSelectedGroup;
         ClearHistoryMenuItem.IsEnabled = hasConversation && _environment.Messages.Count > 0;
         RemoveCurrentConversationMenuItem.IsEnabled = CanRemoveConversation(conversation);
+        RemoveCurrentConversationMenuItem.Text = conversation?.Chat.Scene == ChatScene.Group ? "Disband group" : "Remove friendship";
     }
 
     private void UpdateEnvironmentText()
     {
+        EditProfileButton.Visibility = _environment.Capabilities.ProfileEditing ? Visibility.Visible : Visibility.Collapsed;
+        ManageCustomFacesButton.Visibility = _environment.Capabilities.CustomFaces ? Visibility.Visible : Visibility.Collapsed;
+        ManageCustomFacesButton.IsEnabled = _environment.BotPersona is not null;
+        AccountCredentialsButton.Visibility = _environment.Capabilities.AccountCredentials ? Visibility.Visible : Visibility.Collapsed;
+        AccountCredentialsButton.IsEnabled = !_environment.IsShowcaseMode && _environment.BotPersona is not null;
+        BotPresenceText.Text = _environment.BotPresenceDescription;
+        ToggleBotPresenceButton.Content = _environment.IsBotOnline ? "Simulate offline" : "Restore online";
+        ToggleBotPresenceButton.IsEnabled = !_environment.IsShowcaseMode && _environment.BotPersona is not null;
+        UpdateMaintenanceControls();
         UpdateConnectionPresentation();
         UpdateProfilePresentation();
         UpdatePageHeader();
-        SendingAsText.Text = _environment.CurrentPersona is { } persona
-            ? $"Sending as {persona.DisplayName} · {persona.Id}" : "Choose a sending identity";
+        UpdateSendingIdentityText();
+    }
+
+    private void UpdateSendingIdentityText()
+    {
+        SendingAsText.Text = IsAnonymousDraftActive()
+            ? "Sending anonymously"
+            : _environment.CurrentPersona is { } persona
+            ? $"Sending as {persona.DisplayName} · {persona.Id}" + (_environment.IsBotOnline ? string.Empty : " · bot offline")
+            : "Choose a sending identity";
     }
 
     private void UpdateConnectionPresentation()
@@ -2283,6 +2477,8 @@ public sealed partial class MainWindow : Window
         };
         var transport = _environment.Preferences.Protocol == ProtocolKind.Milky
             ? "HTTP + WebSocket"
+            : _environment.Preferences.Transport == TransportMode.OneBotHttpServer
+                ? "HTTP server"
             : _environment.Preferences.Transport == TransportMode.WebSocketClient
                 ? "WebSocket client"
                 : "WebSocket server";
@@ -2315,6 +2511,7 @@ public sealed partial class MainWindow : Window
         }
 
         _lastConnectionMotionState = motionState;
+        UpdateShowcaseControls();
     }
 
     private static void UpdateMessageActions()
@@ -2326,6 +2523,7 @@ public sealed partial class MainWindow : Window
         UpdateProfilePresentation();
         AccountSendingIdentityBox.SelectedItem = _environment.Personas.FirstOrDefault(item => item.Id == _environment.CurrentPersona?.Id);
         AccountBotBox.SelectedItem = _environment.Personas.FirstOrDefault(item => item.Id == _environment.BotPersona?.Id);
+        AccountBotBox.IsEnabled = !_environment.IsShowcaseMode;
     }
 
     private void UpdateProfilePresentation()
@@ -2363,6 +2561,10 @@ public sealed partial class MainWindow : Window
         catch { picture.ProfilePicture = null; }
     }
 
+    private bool IsAnonymousDraftActive() => _anonymous
+        && _environment.SelectedChat is { } chat && _environment.Capabilities.SupportsAnonymous(chat.Scene)
+        && _activeDraftKey is not null && string.Equals(_activeDraftKey, GetCurrentDraftKey(), StringComparison.Ordinal);
+
     private void SaveActiveDraft()
     {
         if (_activeDraftKey is null)
@@ -2370,7 +2572,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        if (string.IsNullOrEmpty(ComposerTextBox.Text) && _attachments.Count == 0 && _mentions.Count == 0)
+        if (string.IsNullOrEmpty(ComposerTextBox.Text) && _attachments.Count == 0 && _mentions.Count == 0 && _reply is null && _richContent.Count == 0 && !_anonymous)
         {
             _drafts.Remove(_activeDraftKey);
             return;
@@ -2379,12 +2581,18 @@ public sealed partial class MainWindow : Window
         _drafts[_activeDraftKey] = new ComposerDraft(
             ComposerTextBox.Text,
             _mentions.ToArray(),
-            _attachments.ToArray());
+            _attachments.ToArray(),
+            _reply,
+            _richContent.ToArray(),
+            _anonymous);
     }
 
     private void RestoreDraftForCurrentContext()
     {
         _activeDraftKey = GetCurrentDraftKey();
+        _reply = null;
+        _anonymous = false;
+        _richContent.Clear();
         ComposerTextBox.Text = string.Empty;
         _mentions.Clear();
         _attachments.Clear();
@@ -2393,6 +2601,10 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        _anonymous = draft.Anonymous && _environment.SelectedChat is { } chat
+            && _environment.Capabilities.SupportsAnonymous(chat.Scene);
+        _reply = draft.Reply;
+        foreach (var segment in draft.RichContent ?? []) _richContent.Add(segment);
         ComposerTextBox.Text = draft.Text;
         foreach (var mention in draft.Mentions)
         {
@@ -2412,7 +2624,7 @@ public sealed partial class MainWindow : Window
         var bot = _environment.BotPersona;
         return chat is null || sender is null || bot is null
             ? null
-            : $"{chat.Id}|{bot.Id.Length}:{bot.Id}|{sender.Id.Length}:{sender.Id}";
+            : $"{chat.Id}|{bot.Id.Length}:{bot.Id}|{sender.Id.Length}:{sender.Id}|{_environment.Preferences.Protocol}";
     }
 
     private void EnsureDraftContextIsCurrent(string draftKey, string chatId)
@@ -2595,6 +2807,7 @@ public sealed partial class MainWindow : Window
 
     private void ShowErrorMessage(string message)
     {
+        ErrorInfoBar.Severity = InfoBarSeverity.Error;
         ErrorInfoBar.Message = message;
         ErrorInfoBar.IsOpen = true;
     }
@@ -2602,7 +2815,15 @@ public sealed partial class MainWindow : Window
     private sealed record ComposerDraft(
         string Text,
         IReadOnlyList<MentionDraft> Mentions,
-        IReadOnlyList<AttachmentDraft> Attachments);
+        IReadOnlyList<AttachmentDraft> Attachments,
+        ReplyDraft? Reply = null,
+        IReadOnlyList<MessageSegment>? RichContent = null,
+        bool Anonymous = false);
+
+    private sealed record ReplyDraft(string MessageId, string SenderId, string Sender, string Preview);
+    private sealed record MessageRenderKey(string Content, bool Recalled,
+        HorizontalAlignment Alignment, ProtocolKind Protocol, string Quotes);
+    private sealed record MessageRow(ListViewItem Container, MessageRenderKey Key, StackPanel Reactions, TextBlock Meta);
 
     private sealed record MentionChoice(string? UserId, string Label)
     {

@@ -31,8 +31,51 @@ internal sealed class AppStoragePaths
     public bool HasPackageIdentity { get; }
     public IReadOnlyList<string> MigrationMessages { get; }
 
-    public static AppStoragePaths Create()
+    // Launch mode must be read before selecting a database. Resolving this path
+    // must not create or migrate the ordinary workspace during a demo launch.
+    internal static string GetStartupSettingsPath()
     {
+#if DEBUG
+        if (Environment.GetEnvironmentVariable("ASUKA_DEV_DATA_ROOT") is { Length: > 0 } developmentRoot)
+        {
+            if (!Path.IsPathFullyQualified(developmentRoot))
+                throw new InvalidOperationException("ASUKA_DEV_DATA_ROOT must be an absolute directory path.");
+            return Path.Combine(developmentRoot, "startup.json");
+        }
+#endif
+        if (TryGetPackagedFolders(out var localFolder, out _))
+            return Path.Combine(localFolder.Path, "startup.json");
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Asuka", "startup.json");
+    }
+
+    public static AppStoragePaths Create(DemoLaunchOptions? demo = null)
+    {
+        if (demo?.Enabled == true)
+        {
+            var root = demo.GetDataDirectory(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+            var paths = new AppStoragePaths(Path.Combine(root, "settings.json"),
+                Path.Combine(root, "Data", "asuka.sqlite3"), Path.Combine(root, "Cache", "assets"), false, []);
+            paths.EnsureDirectories();
+            return paths;
+        }
+#if DEBUG
+        // A separate workspace makes manual integration tests independent of a
+        // developer's real conversations. Ordinary Release launches use app data.
+        if (Environment.GetEnvironmentVariable("ASUKA_DEV_DATA_ROOT") is { Length: > 0 } developmentRoot)
+        {
+            if (!Path.IsPathFullyQualified(developmentRoot))
+            {
+                throw new InvalidOperationException("ASUKA_DEV_DATA_ROOT must be an absolute directory path.");
+            }
+
+            var developmentPaths = new AppStoragePaths(
+                Path.Combine(developmentRoot, "settings.json"),
+                Path.Combine(developmentRoot, "Data", "asuka.sqlite3"),
+                Path.Combine(developmentRoot, "Cache", "assets"), false, []);
+            developmentPaths.EnsureDirectories();
+            return developmentPaths;
+        }
+#endif
         var legacyRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Asuka");

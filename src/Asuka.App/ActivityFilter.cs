@@ -9,7 +9,8 @@ internal static class ActivityFilter
     public static bool IsFailure(TrafficEntry entry) => entry.Summary == "Unparseable frame"
         || (entry.Direction == TrafficDirection.Reply && entry.Payload is JsonObject payload
             && (string.Equals(payload["status"]?.ToString(), "failed", StringComparison.OrdinalIgnoreCase)
-                || (int.TryParse(payload["retcode"]?.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var code) && code != 0)));
+                || (int.TryParse(payload["retcode"]?.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var code)
+                    && code != 0 && !(code == 1 && string.Equals(payload["status"]?.ToString(), "async", StringComparison.OrdinalIgnoreCase)))));
 
     public static IEnumerable<LogEntryItem> ProtocolEntries(
         IEnumerable<LogEntryItem> entries,

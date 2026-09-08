@@ -271,6 +271,15 @@
                                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                         Style="{StaticResource CaptionTextBlockStyle}"
                                         Text="RTT unavailable" />
+                                    <StackPanel x:Name="ShowcaseControls" Margin="0,8,0,0" Spacing="5" Visibility="Collapsed">
+                                        <TextBlock x:Name="ShowcaseStatusText" Style="{StaticResource CaptionTextBlockStyle}" Text="Demo" />
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <Button Content="Group" Click="ShowcaseGroup_Click" />
+                                            <Button Content="Private" Click="ShowcasePrivate_Click" />
+                                            <Button x:Name="ShowcasePauseButton" Content="Pause" Click="ShowcasePause_Click" />
+                                            <CheckBox x:Name="ShowcaseFollowCheckBox" Content="Follow new messages" IsChecked="True" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                    </StackPanel>
                                 </StackPanel>
                             </Grid>
                             <StackPanel
@@ -376,10 +385,14 @@
                                     <Grid>
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
                                         <RowDefinition Height="*" />
                                         <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
-                                    <Grid>
+                                    <InfoBar x:Name="ReplyBanner" IsOpen="False" IsClosable="True"
+                                             Severity="Informational" Title="Replying" Closed="ReplyBanner_Closed" />
+                                    <Grid Grid.Row="1">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="*" />
@@ -426,9 +439,17 @@
                                                 Visibility="Collapsed" />
                                         </StackPanel>
                                     </Grid>
+                                    <Grid x:Name="RichContentRow" Grid.Row="2" Visibility="Collapsed" ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <ListView x:Name="RichContentList" MaxHeight="72" DisplayMemberPath="TextPreview" AutomationProperties.Name="Pending rich content" />
+                                        <Button x:Name="RemoveRichContentButton" Grid.Column="1" Content="Remove" Click="RemoveRichContent_Click" AutomationProperties.Name="Remove selected rich content" />
+                                    </Grid>
                                     <TextBox
                                         x:Name="ComposerTextBox"
-                                        Grid.Row="1"
+                                        Grid.Row="3"
                                         MinHeight="64"
                                         MaxHeight="160"
                                         Margin="0,8"
@@ -438,10 +459,11 @@
                                         BorderThickness="0"
                                         PlaceholderText="Write a message"
                                         TextWrapping="Wrap" />
-                                    <Grid Grid.Row="2">
+                                    <Grid Grid.Row="4">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
@@ -470,6 +492,10 @@
                                                             <FontIcon Glyph="&#xE8A4;" />
                                                         </MenuFlyoutItem.Icon>
                                                     </MenuFlyoutItem>
+                                                    <MenuFlyoutItem x:Name="FaceButton" Text="QQ emoji" Click="FaceButton_Click" />
+                                                    <MenuFlyoutItem x:Name="CustomFacesButton" Text="Custom images" Click="CustomFaces_Click" Visibility="Collapsed" />
+                                                    <MenuFlyoutItem x:Name="LocationButton" Text="Location" Click="LocationButton_Click" />
+                                                    <MenuFlyoutItem x:Name="AudioFileButton" Text="Audio file" Click="AudioFileButton_Click" />
                                                 </MenuFlyout>
                                             </Button.Flyout>
                                         </Button>
@@ -481,16 +507,26 @@
                                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                             Style="{StaticResource CaptionTextBlockStyle}"
                                             TextTrimming="CharacterEllipsis" />
+                                        <AppBarToggleButton
+                                            x:Name="AnonymousButton"
+                                            Grid.Column="2"
+                                            VerticalAlignment="Center"
+                                            AutomationProperties.Name="Send anonymously"
+                                            Icon="Contact"
+                                            IsCompact="True"
+                                            Label="Anonymous"
+                                            ToolTipService.ToolTip="Send anonymously. Failed anonymous messages stay in the draft."
+                                            Visibility="Collapsed" />
                                         <TextBlock
                                             x:Name="SendStatusText"
-                                            Grid.Column="2"
+                                            Grid.Column="3"
                                             Margin="6,0"
                                             VerticalAlignment="Center"
                                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                             Style="{StaticResource CaptionTextBlockStyle}" />
                                         <Button
                                             x:Name="SendButton"
-                                            Grid.Column="3"
+                                            Grid.Column="4"
                                             Width="36"
                                             Height="36"
                                             Padding="0"
@@ -538,6 +574,7 @@
                                                     <FontIcon Glyph="&#xE716;" />
                                                 </MenuFlyoutItem.Icon>
                                             </MenuFlyoutItem>
+                                            <MenuFlyoutItem x:Name="SimulateRequestMenuItem" Text="Simulate request" Click="SimulateRequest_Click" />
                                         </MenuFlyout>
                                     </Button.Flyout>
                                 </Button>
@@ -549,7 +586,11 @@
                                 </ComboBox>
                                 <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
                                     <TextBlock x:Name="PeopleCountText" TextTrimming="CharacterEllipsis" Style="{StaticResource CaptionTextBlockStyle}" />
-                                    <TextBlock x:Name="PendingRequestsSummary" Text="No pending requests" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <StackPanel Orientation="Horizontal" Spacing="10">
+                                        <TextBlock x:Name="PendingRequestsSummary" Text="No pending requests" VerticalAlignment="Center" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        <HyperlinkButton x:Name="RequestHistoryButton" Content="Request history" Click="RequestHistory_Click" Padding="0" />
+                                        <HyperlinkButton x:Name="GroupNotificationsButton" Content="Group notifications" Click="GroupNotifications_Click" Padding="0" Visibility="Collapsed" />
+                                    </StackPanel>
                                 </StackPanel>
                             </Grid>
                             <Expander x:Name="PendingRequestsExpander" Grid.Row="2" Header="Pending requests" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" IsExpanded="False" Visibility="Collapsed">
@@ -563,6 +604,7 @@
                                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                                     <Button Content="Accept" Click="AcceptRequest_Click" Style="{StaticResource AccentButtonStyle}" />
                                                     <Button Content="Decline" Click="DeclineRequest_Click" />
+                                                    <Button Content="Ignore" Click="IgnoreRequest_Click" Visibility="{Binding IgnoreVisibility}" />
                                                 </StackPanel>
                                             </StackPanel>
                                         </DataTemplate>
@@ -579,7 +621,7 @@
                                                     <Grid.ColumnDefinitions><ColumnDefinition Width="40" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                                     <Border Width="40" Height="40" CornerRadius="20" Background="{ThemeResource ControlFillColorDefaultBrush}"><FontIcon Glyph="{Binding Glyph}" FontSize="18" /></Border>
                                                     <StackPanel Grid.Column="1" Spacing="3">
-                                                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock Text="{Binding DisplayTitle}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                                         <TextBlock Text="{Binding Preview}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
                                                         <TextBlock Text="{Binding IdentityText}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" Style="{StaticResource CaptionTextBlockStyle}" TextTrimming="CharacterEllipsis" />
                                                     </StackPanel>
@@ -658,9 +700,22 @@
                                         <Button
                                             x:Name="AccountNewPersonaButton"
                                             Content="New persona" />
+                                        <Button x:Name="EditProfileButton" Content="Edit profile" Click="EditProfile_Click" Visibility="Collapsed" />
                                         <Button
                                             x:Name="ConnectionSettingsButton"
                                             Content="Connection settings" />
+                                    </StackPanel>
+                                    <StackPanel x:Name="BotPresencePanel" Spacing="8" Margin="0,12,0,0">
+                                        <TextBlock x:Name="BotPresenceText" TextWrapping="Wrap" />
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Button x:Name="ToggleBotPresenceButton" Content="Simulate offline" Click="ToggleBotPresence_Click" />
+                                            <Button x:Name="ManageCustomFacesButton" Content="Custom images" Click="CustomFaces_Click" Visibility="Collapsed" />
+                                        </StackPanel>
+                                        <Button x:Name="AccountCredentialsButton" Content="Account credentials" Click="AccountCredentials_Click" Visibility="Collapsed" />
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Button x:Name="CacheCleanupButton" Content="Clear media cache" Click="CacheCleanup_Click" Visibility="Collapsed" ToolTipService.ToolTip="Remove converted audio and attachment previews. Original attachments are kept." />
+                                            <Button x:Name="RestartProtocolButton" Content="Restart service" Click="RestartProtocol_Click" Visibility="Collapsed" ToolTipService.ToolTip="Restart the OneBot V11 connection with the current settings." />
+                                        </StackPanel>
                                     </StackPanel>
                                 </StackPanel>
                             </ScrollViewer>

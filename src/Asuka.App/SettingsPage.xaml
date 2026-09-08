@@ -57,6 +57,18 @@
                 HorizontalAlignment="Stretch"
                 Spacing="28">
                 <StackPanel Spacing="10">
+                    <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="Demo" />
+                    <Border Padding="20" Style="{StaticResource AsukaCardStyle}">
+                        <StackPanel Spacing="8">
+                            <ToggleSwitch x:Name="DemoModeSwitch" Header="Demo mode" OnContent="On" OffContent="Off" />
+                            <TextBlock
+                                Text="Play a slow stream of rich messages in a fixed group and private chat, including the logo and animated images. Demo conversations use separate local data."
+                                TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock x:Name="DemoModeHint" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+                <StackPanel Spacing="10">
                     <StackPanel Spacing="3">
                         <TextBlock
                             Style="{StaticResource SubtitleTextBlockStyle}"
@@ -168,6 +180,20 @@
                             Header="Milky WebHook URLs"
                             PlaceholderText="One HTTP or HTTPS URL per line"
                             TextWrapping="NoWrap" />
+                        <TextBox x:Name="OneBotWebhookBox" MinHeight="76" AcceptsReturn="True"
+                            Header="OneBot WebHook URLs" PlaceholderText="One HTTP or HTTPS URL per line"
+                            TextWrapping="NoWrap" Visibility="Collapsed" />
+                        <PasswordBox x:Name="WebhookSecretBox" Header="WebHook signing secret"
+                            PasswordRevealMode="Peek" PlaceholderText="Stored in Windows Credential Locker"
+                            Visibility="Collapsed" />
+                        <NumberBox x:Name="WebhookTimeoutBox" Header="WebHook timeout (ms, 0 = no timeout)"
+                            Minimum="0" Maximum="4294967294" SpinButtonPlacementMode="Compact" Visibility="Collapsed" />
+                        <ToggleSwitch x:Name="HeartbeatSwitch" Header="Heartbeat events" Visibility="Collapsed" />
+                        <NumberBox x:Name="HeartbeatIntervalBox" Header="Heartbeat interval (ms)" Minimum="1"
+                            Maximum="2147483647" SpinButtonPlacementMode="Compact" Visibility="Collapsed" />
+                        <NumberBox x:Name="RateLimitBox" Header="Rate limit interval (ms)" Minimum="0" Maximum="3600000" SpinButtonPlacementMode="Compact" Visibility="Collapsed" />
+                        <ToggleSwitch x:Name="HttpEventsSwitch" Header="HTTP event polling" OnContent="Enabled" OffContent="Disabled" Visibility="Collapsed" />
+                        <NumberBox x:Name="HttpEventBufferBox" Header="Event buffer size (0 = unlimited)" Minimum="0" Maximum="2147483647" SpinButtonPlacementMode="Compact" Visibility="Collapsed" />
                         <Grid ColumnSpacing="20">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
@@ -242,21 +268,30 @@
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="*" />
                             </Grid.ColumnDefinitions>
-                            <Image
+                            <Button
+                                x:Name="AboutLogoButton"
                                 Width="72"
                                 Height="72"
+                                Padding="0"
                                 HorizontalAlignment="Left"
                                 VerticalAlignment="Top"
-                                Source="ms-appx:///Assets/Akame.png"
-                                Stretch="Uniform"
-                                AutomationProperties.Name="Asuka app icon" />
+                                AutomationProperties.Name="Asuka app icon"
+                                Background="Transparent"
+                                BorderThickness="0">
+                                <Grid x:Name="AboutLogoMotionHost" Width="72" Height="72">
+                                    <Image
+                                        Source="ms-appx:///Assets/Akame.png"
+                                        Stretch="Uniform"
+                                        AutomationProperties.Name="Asuka app icon" />
+                                </Grid>
+                            </Button>
                             <StackPanel Grid.Column="1" Spacing="9">
                                 <TextBlock
                                     Style="{StaticResource SubtitleTextBlockStyle}"
-                                    Text="Asuka for Windows" />
+                                    Text="Asuka for Windows" TextWrapping="Wrap" />
                                 <TextBlock
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="Native WinUI 3 · .NET 10 · Windows 11" />
+                                    Text="Native WinUI 3 · .NET 10 · Windows 11" TextWrapping="Wrap" />
                                 <TextBlock
                                     MaxWidth="680"
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -269,6 +304,41 @@
                                     Content="Open data folder" />
                             </StackPanel>
                         </Grid>
+                    </Border>
+                    <Border Padding="20" Style="{StaticResource AsukaCardStyle}">
+                        <StackPanel Spacing="10">
+                            <TextBlock
+                                Style="{StaticResource SubtitleTextBlockStyle}"
+                                Text="Components and licenses" />
+                            <TextBlock
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Asuka uses the following runtime and bundled native components. Open each project’s license for its complete terms."
+                                TextWrapping="Wrap" />
+                            <ItemsControl x:Name="ComponentLicensesList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="local:ComponentLicense">
+                                        <Grid ColumnSpacing="12" Padding="0,4">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Spacing="2">
+                                                <TextBlock
+                                                    FontWeight="SemiBold"
+                                                    Text="{x:Bind DisplayName}" TextWrapping="Wrap" />
+                                                <TextBlock
+                                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                    Text="{x:Bind LicenseName}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                            <HyperlinkButton
+                                                Grid.Column="1"
+                                                Content="License"
+                                                NavigateUri="{x:Bind LicenseUri}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
                     </Border>
                 </StackPanel>
             </StackPanel>

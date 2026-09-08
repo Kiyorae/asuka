@@ -14,9 +14,14 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="../../src/Asuka.App/PersonaSelection.cs" Link="App/PersonaSelection.cs" />
+    <Compile Include="../../src/Asuka.App/AppPreferences.cs" Link="App/AppPreferences.cs" />
     <Compile Include="../../src/Asuka.App/LogEntryItem.cs" Link="App/LogEntryItem.cs" />
     <Compile Include="../../src/Asuka.App/ActivityFilter.cs" Link="App/ActivityFilter.cs" />
     <Compile Include="../../src/Asuka.App/CollectionSync.cs" Link="App/CollectionSync.cs" />
     <Compile Include="../../src/Asuka.App/PageNavigationState.cs" Link="App/PageNavigationState.cs" />
+    <Compile Include="../../src/Asuka.App/GroupManagementPolicy.cs" Link="App/GroupManagementPolicy.cs" />
+    <Compile Include="../../src/Asuka.App/DemoLaunchOptions.cs" Link="App/DemoLaunchOptions.cs" />
+    <Compile Include="../../src/Asuka.App/DemoModeSettingsStore.cs" Link="App/DemoModeSettingsStore.cs" />
+    <Compile Include="../../src/Asuka.App/MessageTextBlocks.cs" Link="App/MessageTextBlocks.cs" />
   </ItemGroup>
 </Project>

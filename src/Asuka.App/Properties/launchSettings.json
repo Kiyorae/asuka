@@ -5,6 +5,11 @@
     },
     "Asuka (Unpackaged)": {
       "commandName": "Project"
+    },
+    "Asuka (Demo)": {
+      "commandName": "Project",
+      "commandLineArgs": "--demo",
+      "nativeDebugging": false
     }
   }
 }

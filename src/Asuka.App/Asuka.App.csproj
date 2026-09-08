@@ -32,6 +32,7 @@
   <ItemGroup>
     <Content Include="Assets\*.png" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets\Asuka.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\Showcase\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../Asuka.Core/Asuka.Core.csproj" />

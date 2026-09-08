@@ -67,6 +67,8 @@ public sealed class ActivityFilterTests
         Assert.IsFalse(ActivityFilter.IsFailure(new TrafficEntry(TrafficDirection.Reply, "reply", JsonValue.Create("text")!)));
         Assert.IsFalse(ActivityFilter.IsFailure(new TrafficEntry(TrafficDirection.OutboundEvent, "event", new JsonObject { ["retcode"] = 5 })));
         Assert.IsTrue(ActivityFilter.IsFailure(new TrafficEntry(TrafficDirection.Reply, "reply", new JsonObject { ["retcode"] = "-1" })));
+        Assert.IsFalse(ActivityFilter.IsFailure(new TrafficEntry(TrafficDirection.Reply, "queued", new JsonObject { ["status"] = "async", ["retcode"] = 1, ["data"] = null })));
+        Assert.IsTrue(ActivityFilter.IsFailure(new TrafficEntry(TrafficDirection.Reply, "failed", new JsonObject { ["status"] = "failed", ["retcode"] = 1 })));
     }
 
     [TestMethod]
@@ -98,6 +100,7 @@ public sealed class ActivityFilterTests
         Assert.HasCount(2, visible);
     }
 
+    // Timestamp text is searchable; fixed time avoids accidentally matching payload queries.
     private static LogEntryItem Entry(string summary, string detail, TrafficDirection direction, string protocol) =>
-        new(DateTimeOffset.UtcNow, "Protocol", summary, detail, direction, protocol);
+        new(new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero), "Protocol", summary, detail, direction, protocol);
 }

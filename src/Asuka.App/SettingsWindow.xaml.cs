@@ -109,7 +109,7 @@ public sealed partial class SettingsWindow : Window
             var theme = ThemeBox.SelectedItem is AppThemePreference selectedTheme
                 ? selectedTheme
                 : AppThemePreference.System;
-            var preferences = new AppPreferences
+            var preferences = _environment.Preferences with
             {
                 Protocol = protocol,
                 Transport = protocol == ProtocolKind.Milky ? TransportMode.MilkyService : transport,

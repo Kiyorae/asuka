@@ -1,0 +1,89 @@
+{
+  "generator": "scripts/generate-showcase-assets.py",
+  "pillow": "12.3.0",
+  "logo_source": "src/Asuka.App/Assets/AsukaSquare150x150Logo.scale-400.png",
+  "video_generation": {
+    "ffmpeg": "ffmpeg version n4.3.1-playwright-build-1009 Copyright (c) 2000-2020 the FFmpeg developers",
+    "generated": [
+      "logo-spin.webm"
+    ],
+    "mp4_available": true,
+    "note": "Video is silent; voice.wav is the separate audio fixture.",
+    "mp4_note": "Existing MP4 retained; use --native-mp4 to regenerate it from the current WebM."
+  },
+  "verification": {
+    "gif": {
+      "width": 256,
+      "height": 256,
+      "frames": 36,
+      "duration_ms": 3600,
+      "loop": 0,
+      "unique_frames": 36,
+      "minimum_edge_margin_px": 40
+    },
+    "wav": {
+      "sample_rate": 24000,
+      "channels": 1,
+      "bits_per_sample": 16,
+      "duration_seconds": 2,
+      "peak": 5397,
+      "rms": 2034.953
+    },
+    "silk": {
+      "container": "Tencent SILK v3",
+      "packets": 10,
+      "duration_seconds": 0.2,
+      "decoded_pcm_bytes": 9600
+    },
+    "logo-spin.webm": {
+      "decoded_frames": 36,
+      "width": 256,
+      "height": 256,
+      "duration_seconds": 3.6,
+      "codec": "VP8"
+    },
+    "logo-spin.mp4": {
+      "width": 256,
+      "height": 256,
+      "duration_seconds": 3.6,
+      "codec": "H264",
+      "container": "MPEG4",
+      "frames_per_second": 10,
+      "verification": "Windows MediaEncodingProfile and StorageFile VideoProperties; metadata validation, not a full frame decode"
+    }
+  },
+  "files": {
+    "logo-spin.gif": {
+      "bytes": 437660,
+      "sha256": "31df6aaf36021e64a7d1d16fc8335b2e9e296c2c424db773b1b00b459f7da4a3"
+    },
+    "logo-spin.mp4": {
+      "bytes": 180494,
+      "sha256": "2a397923587dcd01f8fda525f83efc160a6b849c8283b42c519e986468d1a084"
+    },
+    "logo-spin.webm": {
+      "bytes": 184163,
+      "sha256": "15da5de7805425fbe432b5b0f22b569198cc26f28b68a3d44eb70a253e0e1f25"
+    },
+    "logo.png": {
+      "bytes": 334654,
+      "sha256": "05d278ff9d368ddd6a4f889a71dcf64c340df672302c2c9a8218cb08c676e96c"
+    },
+    "notes.txt": {
+      "bytes": 246,
+      "sha256": "2f66b370306facfbaedce0b6de68a19341735dc64272d06c9d54db432a24424e"
+    },
+    "SILK-SDK-LICENSE.txt": {
+      "bytes": 1665,
+      "sha256": "f1ad2b9fb9f9c67bc0486ea12ef30aa1ef641b646d39cfcdae4bfd6e3bcc6c35"
+    },
+    "voice.silk": {
+      "bytes": 445,
+      "sha256": "83d34d789ffd19eba14a7577f88d05a28d4aac0ad82a173d4148a86cef05265a"
+    },
+    "voice.wav": {
+      "bytes": 96044,
+      "sha256": "f94a928643e7ada5b3d031965806f7825c2ac49a7187f2526146042cafd05a55"
+    }
+  }
+}

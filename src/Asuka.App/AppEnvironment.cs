@@ -10,9 +10,10 @@ using Windows.Storage;
 
 namespace Asuka.App;
 
-public sealed class AppEnvironment : BindableBase, IAsyncDisposable
+public sealed partial class AppEnvironment : BindableBase, IAsyncDisposable
 {
     private const string CredentialResource = "Asuka.ProtocolAccessToken";
+    private const string WebhookSecretResource = "Asuka.OneBotWebhookSecret";
     private const string CredentialUser = "default";
     private readonly DispatcherQueue _dispatcher;
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
@@ -35,23 +36,31 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
     private string _roundTripText = "RTT unavailable";
     private bool _initialized;
     private bool _disposed;
+    private int _chatSelectionVersion;
+    private bool _isSelectingChat;
 
-    public AppEnvironment(DispatcherQueue dispatcher)
+    public AppEnvironment(DispatcherQueue dispatcher) : this(dispatcher, new DemoLaunchOptions()) { }
+
+    internal AppEnvironment(DispatcherQueue dispatcher, DemoLaunchOptions launchOptions, DemoLaunchOptions? savedDemoMode = null)
     {
         _dispatcher = dispatcher;
-        _storagePaths = AppStoragePaths.Create();
+        _launchOptions = launchOptions;
+        _savedDemoMode = savedDemoMode;
+        _storagePaths = AppStoragePaths.Create(launchOptions);
         _preferencesPath = _storagePaths.SettingsPath;
         Store = new AsukaStore(_storagePaths.DatabasePath);
         Assets = new AssetStore(_storagePaths.AssetsDirectory);
         Platform = new PlatformService(Store, Assets);
         Media = new MediaService(Store, Assets);
         Store.Changed += OnStoreChanged;
+        Platform.BotPresenceChanged += OnBotPresenceChanged;
     }
 
     public AsukaStore Store { get; }
     public AssetStore Assets { get; }
     public PlatformService Platform { get; }
     public MediaService Media { get; }
+    public ProtocolCapabilities Capabilities => ProtocolCapabilities.For(Preferences.Protocol);
     public ObservableCollection<PersonaItem> Personas { get; } = [];
     public ObservableCollection<Group> Groups { get; } = [];
     public ObservableCollection<ConversationItem> Conversations { get; } = [];
@@ -95,6 +104,8 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
             {
                 CurrentPersonaBelongsToSelectedGroup = false;
                 RaisePropertyChanged(nameof(BotPersonaName));
+                RaisePropertyChanged(nameof(IsBotOnline));
+                RaisePropertyChanged(nameof(BotPresenceDescription));
                 RaisePropertyChanged(nameof(IdentityStatus));
                 RaisePropertyChanged(nameof(CanCompose));
             }
@@ -102,6 +113,20 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
     }
 
     public string BotPersonaName => BotPersona?.DisplayName ?? "No bot account";
+
+    public bool IsBotOnline => BotPersona is { } bot && Platform.IsBotOnline(bot.Id);
+    public string BotPresenceDescription => BotPersona is not { } bot ? "No bot account selected."
+        : Platform.GetBotPresence(bot.Id) is not { } presence ? "Bot account is not registered."
+        : presence.IsOnline ? "QQ account online"
+        : string.IsNullOrWhiteSpace(presence.Reason) ? "QQ account offline" : $"QQ account offline · {presence.Reason}";
+
+    private void OnBotPresenceChanged(object? sender, BotPresence presence) => RunOnUi(() =>
+    {
+        if (_disposed) return;
+        RaisePropertyChanged(nameof(IsBotOnline));
+        RaisePropertyChanged(nameof(BotPresenceDescription));
+        RaisePropertyChanged(nameof(CanCompose));
+    });
 
     public string IdentityStatus => CurrentPersona is null || BotPersona is null
         ? "Identity not configured"
@@ -146,9 +171,15 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
         }
     }
 
-    public bool CanCompose => IsChatCompatible(SelectedChat, CurrentPersona, BotPersona)
+    public bool CanCompose => !_isSelectingChat && IsChatCompatible(SelectedChat, CurrentPersona, BotPersona)
         && (SelectedChat?.Scene != ChatScene.Group || CurrentPersonaBelongsToSelectedGroup)
-        && _session?.State.Kind is SessionStateKind.Ready or SessionStateKind.Connected;
+        && (CurrentPersona?.Id != BotPersona?.Id || IsBotOnline)
+        && HasReadyMessageContext;
+
+    public bool HasReadyMessageContext => (IsShowcaseMode && _initialized)
+        || _session?.State.Kind is SessionStateKind.Ready or SessionStateKind.Connected
+        || (_session?.State.IsActive == true && Preferences.Protocol != ProtocolKind.Milky
+            && !string.IsNullOrWhiteSpace(Preferences.OneBotWebhookUrls));
 
     public string ConnectionStatus
     {
@@ -177,6 +208,14 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
         {
             if (_initialized)
             {
+                return;
+            }
+
+            if (IsShowcaseMode)
+            {
+                await InitializeShowcaseAsync(cancellationToken);
+                _initialized = true;
+                RaisePropertyChanged(nameof(CanCompose));
                 return;
             }
 
@@ -271,6 +310,7 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
                 PersonaId = null,
             };
             Platform.SetRegisteredBot(BotPersona.Id);
+            await RestoreAccountCredentialsAsync(BotPersona.Id, cancellationToken);
             Media.SetEndpoint(Preferences.Host, Preferences.Port, Preferences.AdvertisedHost);
             await RefreshAllAsync(cancellationToken);
             await SavePreferencesAsync(Preferences, cancellationToken);
@@ -305,6 +345,8 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
 
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
+        if (IsShowcaseMode)
+            throw new InvalidOperationException("Demo mode runs locally. Restart without --demo to connect a bot.");
         if (BotPersona is null)
         {
             throw new InvalidOperationException("Create or select a bot account before connecting.");
@@ -315,8 +357,17 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
         Media.SetEndpoint(settings.Host, settings.Port, settings.AdvertisedHost);
         IProtocolImplementation implementation = Preferences.Protocol switch
         {
-            ProtocolKind.OneBotV11 => new OneBotProtocol(OneBotVersion.V11, BotPersona.Id, Platform, Media),
-            ProtocolKind.OneBotV12 => new OneBotProtocol(OneBotVersion.V12, BotPersona.Id, Platform, Media),
+            ProtocolKind.OneBotV11 => new OneBotProtocol(OneBotVersion.V11, BotPersona.Id, Platform, Media)
+            {
+                RateLimitInterval = TimeSpan.FromMilliseconds(Preferences.OneBotRateLimitMilliseconds),
+                HeartbeatEnabled = Preferences.HeartbeatEnabled,
+                HeartbeatIntervalMilliseconds = Preferences.HeartbeatIntervalMilliseconds,
+            },
+            ProtocolKind.OneBotV12 => new OneBotProtocol(OneBotVersion.V12, BotPersona.Id, Platform, Media)
+            {
+                HeartbeatEnabled = Preferences.HeartbeatEnabled,
+                HeartbeatIntervalMilliseconds = Preferences.HeartbeatIntervalMilliseconds,
+            },
             ProtocolKind.Milky => new MilkyProtocol(BotPersona.Id, Platform, Media),
             _ => throw new InvalidOperationException("Unsupported protocol selection."),
         };
@@ -326,6 +377,7 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
         session.RoundTripTimeChanged += OnRoundTripTimeChanged;
         session.TrafficObserved += OnTrafficObserved;
         session.OutboundDeliveryFailed += OnOutboundDeliveryFailed;
+        session.DeferredActionFailed += OnDeferredActionFailed;
         _session = session;
         RaisePropertyChanged(nameof(ConnectionButtonText));
         try
@@ -376,11 +428,32 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
         }
     }
 
-    public async Task ApplyPreferencesAsync(AppPreferences preferences, CancellationToken cancellationToken = default)
+    public Task ApplyPreferencesAsync(AppPreferences preferences, CancellationToken cancellationToken = default) =>
+        ApplyPreferencesAsync(preferences, reconnect: true, cancellationToken);
+
+    internal async Task ApplyPreferencesAsync(AppPreferences preferences, bool reconnect, CancellationToken cancellationToken = default)
+    {
+        if (!IsShowcaseMode)
+        {
+            await ApplyPreferencesCoreAsync(preferences, reconnect, cancellationToken);
+            return;
+        }
+        ObjectDisposedException.ThrowIf(_disposed || _showcaseStopped, this);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _showcaseLifetime.Token);
+        await _showcaseGate.WaitAsync(cancellation.Token);
+        try { await ApplyPreferencesCoreAsync(preferences, reconnect, cancellation.Token); }
+        finally { _showcaseGate.Release(); }
+    }
+
+    private async Task ApplyPreferencesCoreAsync(AppPreferences preferences, bool reconnect, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(preferences);
+        if (preferences.OneBotRateLimitMilliseconds is < 0 or > 3_600_000)
+            throw new ArgumentOutOfRangeException(nameof(preferences), "The queued action interval must be between 0 and 3600000 ms.");
+        if (IsShowcaseMode && preferences.BotUserId != ClientShowcase.BotId)
+            throw new InvalidOperationException("Demo mode uses the fixed Asuka Bot account.");
         var requiresServerToken = preferences.Protocol == ProtocolKind.Milky
-            || preferences.Transport == TransportMode.WebSocketServer;
+            || preferences.Transport is TransportMode.WebSocketServer or TransportMode.OneBotHttpServer;
         if (requiresServerToken && string.IsNullOrWhiteSpace(preferences.AccessToken))
         {
             preferences = preferences with { AccessToken = CreateAccessToken() };
@@ -388,6 +461,13 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
 
         var settings = preferences.ToConnectionSettings();
         settings.Validate();
+        if (IsShowcaseMode && _showcase is not null && _showcaseProtocol != preferences.Protocol)
+        {
+            await _showcase.ResetAsync(cancellationToken);
+            _showcaseProtocol = preferences.Protocol;
+        }
+        _chatSelectionVersion++;
+        _isSelectingChat = false;
         var wasActive = _session?.State.IsActive == true;
         await DisconnectAsync(cancellationToken);
 
@@ -408,9 +488,12 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
                 ? TransportMode.MilkyService
                 : preferences.Transport,
         };
+        _chatSelectionVersion++;
+        _isSelectingChat = false;
         CurrentPersona = activePersona;
         BotPersona = botPersona;
         Platform.SetRegisteredBot(botPersona.Id);
+        await RestoreAccountCredentialsAsync(botPersona.Id, cancellationToken);
         Media.SetEndpoint(Preferences.Host, Preferences.Port, Preferences.AdvertisedHost);
         SelectedChat = null;
         SelectedChatTitle = "Choose a conversation";
@@ -424,7 +507,7 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
             "Saved",
             $"Active identity: {activePersona.Id}; bot account: {botPersona.Id}; protocol: {Preferences.Protocol}.");
 
-        if (wasActive)
+        if (wasActive && reconnect)
         {
             await ConnectAsync(cancellationToken);
         }
@@ -507,8 +590,12 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
         PendingRequest request,
         bool approve,
         string reason = "",
-        CancellationToken cancellationToken = default) =>
-        Platform.ResolveRequestAsync(request.Flag, approve, reason, cancellationToken: cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        if (BotPersona?.Id != request.SelfId) throw new InvalidOperationException("The bot account for this request changed.");
+        return Platform.ResolveRequestAsync(request.Flag, approve, reason, expectedSelfId: request.SelfId,
+            expectedRequestId: request.Id, cancellationToken: cancellationToken);
+    }
 
     public Task SelectConversationAsync(ConversationItem? conversation, CancellationToken cancellationToken = default) =>
         conversation is null
@@ -543,19 +630,37 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
             }
         }
 
-        SelectedChat = chat;
-        SelectedChatTitle = chat.Scene.IsPrivate()
-            ? await ResolveChatTitleAsync(chat, counterpartId, cancellationToken)
-            : title ?? await ResolveChatTitleAsync(chat, null, cancellationToken);
-        SelectedChatSubtitle = chat.Scene switch
+        var version = ++_chatSelectionVersion;
+        _isSelectingChat = true;
+        RaisePropertyChanged(nameof(CanCompose));
+        try
         {
-            ChatScene.Group => $"Group · {chat.PeerId}",
-            ChatScene.Friend => $"Direct message · {counterpartId}",
-            _ => $"Temporary chat · {counterpartId}",
-        };
-        await RefreshSelectedGroupMembershipAsync(cancellationToken);
-        await RefreshMessagesAsync(cancellationToken);
-        SelectedChatChanged?.Invoke(this, EventArgs.Empty);
+            var resolvedTitle = chat.Scene.IsPrivate()
+                ? await ResolveChatTitleAsync(chat, counterpartId, cancellationToken)
+                : title ?? await ResolveChatTitleAsync(chat, null, cancellationToken);
+            if (version != _chatSelectionVersion) return;
+            SelectedChat = chat;
+            SelectedChatTitle = resolvedTitle;
+            SelectedChatSubtitle = chat.Scene switch
+            {
+                ChatScene.Group => $"Group · {chat.PeerId}",
+                ChatScene.Friend => $"Direct message · {counterpartId}",
+                _ => $"Temporary chat · {counterpartId}",
+            };
+            // Switch the draft synchronously with the selected conversation,
+            // before any membership/message reads can yield to user input.
+            SelectedChatChanged?.Invoke(this, EventArgs.Empty);
+            await RefreshSelectedGroupMembershipAsync(cancellationToken);
+            await RefreshMessagesAsync(cancellationToken);
+        }
+        finally
+        {
+            if (version == _chatSelectionVersion)
+            {
+                _isSelectingChat = false;
+                RaisePropertyChanged(nameof(CanCompose));
+            }
+        }
     }
 
     public async Task<Message> SendAsync(
@@ -592,11 +697,34 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
         var persona = CurrentPersona ?? throw new InvalidOperationException("No active persona.");
         var bot = BotPersona ?? throw new InvalidOperationException("No bot account.");
         var chat = SelectedChat ?? throw new InvalidOperationException("No conversation selected.");
+        var anonymous = content.OfType<AnonymousSegment>().Any();
+        var protocol = Preferences.Protocol;
         _ = ValidatePrivateChat(chat, persona, bot);
-        var session = _session;
-        if (session?.State.Kind is not (SessionStateKind.Ready or SessionStateKind.Connected))
+        if (content.Any(segment => !Capabilities.SupportsSegment(segment)))
+        {
+            throw new InvalidOperationException("This message contains content unavailable in the selected protocol.");
+        }
+        if (anonymous && !Capabilities.SupportsAnonymous(chat.Scene))
+        {
+            throw new InvalidOperationException("Anonymous messages are only available in OneBot V11 group conversations.");
+        }
+
+        foreach (var reply in content.OfType<ReplySegment>())
+        {
+            var target = await Store.GetMessageAsync(reply.MessageId, cancellationToken);
+            if (target is null || target.IsRecalled || target.Chat != chat)
+            {
+                throw new InvalidOperationException("The reply target is no longer available in this conversation.");
+            }
+        }
+        if (!HasReadyMessageContext)
         {
             throw new InvalidOperationException("Connect a ready protocol session before sending.");
+        }
+        if (anonymous && (CurrentPersona?.Id != persona.Id || BotPersona?.Id != bot.Id
+            || SelectedChat != chat || Preferences.Protocol != protocol || !Capabilities.SupportsAnonymous(chat.Scene)))
+        {
+            throw new InvalidOperationException("The conversation, sending identity or protocol changed. Review the anonymous draft and try again.");
         }
 
         return await Platform.SendMessageAsync(
@@ -613,16 +741,40 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         await using var source = await file.OpenStreamForReadAsync();
-        var asset = await Assets.StoreAsync(source, file.Name, file.ContentType, cancellationToken);
+        var mimeType = string.IsNullOrWhiteSpace(file.ContentType) || file.ContentType == "application/octet-stream"
+            ? AssetStore.MimeTypeForFileName(file.Name) : file.ContentType;
+        var asset = await Assets.StoreAsync(source, file.Name, mimeType, cancellationToken);
         await Platform.SaveAssetAsync(asset, cancellationToken);
         AddLog("Attachment", "Prepared", $"{file.Name} ({asset.ByteCount} bytes, {asset.Id}).");
         return new AttachmentDraft(file, asset);
+    }
+
+    public bool SupportsMessageAttachment(StorageFile file)
+    {
+        var mimeType = string.IsNullOrWhiteSpace(file.ContentType) || file.ContentType == "application/octet-stream"
+            ? AssetStore.MimeTypeForFileName(file.Name) : file.ContentType;
+        var preview = new AttachmentDraft(file, new Asset("preview", file.Name, mimeType));
+        return Capabilities.SupportsSegment(preview.ToSegment());
     }
 
     public async Task RecallMessageAsync(string messageId, CancellationToken cancellationToken = default)
     {
         var persona = CurrentPersona ?? throw new InvalidOperationException("No active persona.");
         await Platform.RecallMessageAsync(messageId, persona.Id, cancellationToken);
+    }
+
+    public async Task ReactAsync(string messageId, string reaction, string reactionType, bool added,
+        CancellationToken cancellationToken = default)
+    {
+        var persona = CurrentPersona ?? throw new InvalidOperationException("No active persona.");
+        var message = await Store.GetMessageAsync(messageId, cancellationToken)
+            ?? throw new InvalidOperationException("The message no longer exists.");
+        if (!Capabilities.SupportsReactions(message.Scene) || message.Chat != SelectedChat)
+        {
+            throw new InvalidOperationException("Reactions are unavailable in this conversation.");
+        }
+
+        await Platform.ReactAsync(messageId, persona.Id, reaction, added, reactionType, cancellationToken);
     }
 
     public async Task ClearSelectedConversationHistoryAsync(CancellationToken cancellationToken = default)
@@ -660,6 +812,9 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
             var pendingRequests = BotPersona is null
                 ? []
                 : await Store.GetPendingRequestsAsync(BotPersona.Id, cancellationToken: cancellationToken);
+            var pinned = BotPersona is null || !Capabilities.PeerPins ? []
+                : (await Store.GetPeerStatesAsync(BotPersona.Id, cancellationToken))
+                    .Where(peer => peer.IsPinned).Select(peer => peer.Chat.Id).ToHashSet(StringComparer.Ordinal);
             var userMap = users.ToDictionary(user => user.Id, StringComparer.Ordinal);
             var groupMap = groups.ToDictionary(group => group.Id, StringComparer.Ordinal);
             var currentPersona = CurrentPersona;
@@ -733,14 +888,20 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
 
             await RunOnUiAsync(() =>
             {
+                CurrentPersona = userMap.GetValueOrDefault(CurrentPersona?.Id ?? string.Empty);
+                BotPersona = userMap.GetValueOrDefault(BotPersona?.Id ?? string.Empty);
+                foreach (var item in chatItems) item.IsPinned = pinned.Contains(item.Id);
                 Replace(Personas, users.Select(user => new PersonaItem(user)));
                 Replace(Groups, groups);
                 Replace(Conversations, chatItems);
                 Replace(PendingRequests, pendingRequests.Select(request => new PendingRequestItem(
                     request,
                     userMap.GetValueOrDefault(request.RequesterId),
-                    request.GroupId is null ? null : groupMap.GetValueOrDefault(request.GroupId))));
+                    request.GroupId is null ? null : groupMap.GetValueOrDefault(request.GroupId),
+                    request.TargetUserId is null ? null : userMap.GetValueOrDefault(request.TargetUserId),
+                    Preferences.Protocol == ProtocolKind.Milky)));
             });
+            await RefreshSelectedGroupMembershipAsync(cancellationToken);
             await RefreshMessagesAsync(cancellationToken);
         }
         finally
@@ -768,17 +929,20 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
             }
 
             AddLog("Lifecycle", "Stopping", "Closing protocol transports and application storage.");
+            await StopShowcaseAsync();
             Task[] outstandingRefreshes;
             lock (_refreshTasksGate)
             {
                 _disposed = true;
                 Store.Changed -= OnStoreChanged;
+                Platform.BotPresenceChanged -= OnBotPresenceChanged;
                 _refreshCancellation.Cancel();
                 outstandingRefreshes = [.. _outstandingRefreshes];
             }
 
             await AwaitRefreshesAsync(outstandingRefreshes);
             await DisconnectAsync();
+            await DisposeAccountCredentialsAsync();
             await Platform.DisposeAsync();
             Assets.Dispose();
             await Store.DisposeAsync();
@@ -795,6 +959,8 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
 
     private async Task ClearSelectedChatAsync()
     {
+        _chatSelectionVersion++;
+        _isSelectingChat = false;
         SelectedChat = null;
         SelectedChatTitle = "Choose a conversation";
         SelectedChatSubtitle = "Select a conversation from the sidebar.";
@@ -815,11 +981,21 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
         var records = await Store.GetMessagesAsync(chat, 500, cancellationToken);
         var users = await Store.GetAllUsersAsync(cancellationToken);
         var userMap = users.ToDictionary(user => user.Id, StringComparer.Ordinal);
+        var reactions = (await Store.GetChatReactionsAsync(chat, cancellationToken)).ToLookup(item => item.MessageId);
+        var essenceIds = Capabilities.GroupContent ? await Store.GetChatEssenceMessageIdsAsync(chat, cancellationToken)
+            : new HashSet<string>(StringComparer.Ordinal);
         var viewItems = records.Select(message => new MessageItem(
             message,
             userMap.GetValueOrDefault(message.SenderId),
-            message.SenderId == persona.Id));
-        await RunOnUiAsync(() => Replace(Messages, viewItems));
+            message.SenderId == persona.Id)
+        { Reactions = reactions[message.Id].ToArray(), IsEssence = essenceIds.Contains(message.Id) }).ToArray();
+        await RunOnUiAsync(() =>
+        {
+            if (SelectedChat == chat && CurrentPersona?.Id == persona.Id)
+            {
+                Replace(Messages, viewItems);
+            }
+        });
     }
 
     private async Task RefreshSelectedGroupMembershipAsync(CancellationToken cancellationToken)
@@ -1044,6 +1220,9 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
     private void OnOutboundDeliveryFailed(object? sender, Exception exception) =>
         ReportError("Outbound delivery failed", exception);
 
+    private void OnDeferredActionFailed(object? sender, Exception exception) =>
+        ReportError("Deferred protocol action failed", exception);
+
     // Retain the full current application session. Panels filter their own views, never this history.
     // Appending also avoids shifting every retained record for each new event.
     private void AddLog(LogEntryItem entry) => RunOnUi(() => Logs.Add(entry));
@@ -1056,6 +1235,7 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
         session.RoundTripTimeChanged -= OnRoundTripTimeChanged;
         session.TrafficObserved -= OnTrafficObserved;
         session.OutboundDeliveryFailed -= OnOutboundDeliveryFailed;
+        session.DeferredActionFailed -= OnDeferredActionFailed;
     }
 
     private async Task<AppPreferences> LoadPreferencesAsync(CancellationToken cancellationToken)
@@ -1072,10 +1252,11 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
                 stream,
                 AppPreferences.SerializerOptions,
                 cancellationToken) ?? new AppPreferences();
-            var token = ReadAccessToken();
+            var token = ReadCredential(CredentialResource);
             return preferences with
             {
                 AccessToken = string.IsNullOrWhiteSpace(token) ? CreateAccessToken() : token,
+                OneBotWebhookSecret = ReadCredential(WebhookSecretResource),
             };
         }
         catch (Exception exception) when (exception is IOException or JsonException or UnauthorizedAccessException)
@@ -1087,6 +1268,7 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
 
     private async Task SavePreferencesAsync(AppPreferences preferences, CancellationToken cancellationToken)
     {
+        if (IsShowcaseMode) return;
         var temporary = $"{_preferencesPath}.{Guid.NewGuid():N}.tmp";
         try
         {
@@ -1100,7 +1282,8 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
             }
 
             File.Move(temporary, _preferencesPath, true);
-            SaveAccessToken(preferences.AccessToken);
+            SaveCredential(CredentialResource, preferences.AccessToken);
+            SaveCredential(WebhookSecretResource, preferences.OneBotWebhookSecret);
         }
         finally
         {
@@ -1111,11 +1294,11 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
         }
     }
 
-    private static string ReadAccessToken()
+    private static string ReadCredential(string resource)
     {
         try
         {
-            var credential = new PasswordVault().Retrieve(CredentialResource, CredentialUser);
+            var credential = new PasswordVault().Retrieve(resource, CredentialUser);
             credential.RetrievePassword();
             return credential.Password;
         }
@@ -1125,12 +1308,12 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
         }
     }
 
-    private static void SaveAccessToken(string token)
+    private static void SaveCredential(string resource, string token)
     {
         var vault = new PasswordVault();
         try
         {
-            var existing = vault.Retrieve(CredentialResource, CredentialUser);
+            var existing = vault.Retrieve(resource, CredentialUser);
             vault.Remove(existing);
         }
         catch (Exception exception) when (exception is System.Runtime.InteropServices.COMException or InvalidOperationException)
@@ -1139,7 +1322,7 @@ public sealed class AppEnvironment : BindableBase, IAsyncDisposable
 
         if (!string.IsNullOrEmpty(token))
         {
-            vault.Add(new PasswordCredential(CredentialResource, CredentialUser, token));
+            vault.Add(new PasswordCredential(resource, CredentialUser, token));
         }
     }
 

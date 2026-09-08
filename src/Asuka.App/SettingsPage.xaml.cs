@@ -15,6 +15,7 @@ public sealed partial class SettingsPage : UserControl, IDisposable
     [
         TransportMode.WebSocketServer,
         TransportMode.WebSocketClient,
+        TransportMode.OneBotHttpServer,
     ];
 
     private AppEnvironment? _environment;
@@ -29,6 +30,7 @@ public sealed partial class SettingsPage : UserControl, IDisposable
     public SettingsPage()
     {
         InitializeComponent();
+        InitializeAbout();
         WireUiEvents();
         InstallKeyboardAccelerators();
         ProtocolBox.ItemsSource = Enum.GetValues<ProtocolKind>();
@@ -83,7 +85,7 @@ public sealed partial class SettingsPage : UserControl, IDisposable
         _isLoadingDraft = true;
         try
         {
-            _lastOneBotTransport = draft.Transport is TransportMode.WebSocketServer or TransportMode.WebSocketClient
+            _lastOneBotTransport = draft.Transport is TransportMode.WebSocketServer or TransportMode.WebSocketClient or TransportMode.OneBotHttpServer
                 ? draft.Transport
                 : TransportMode.WebSocketServer;
             ProtocolBox.SelectedItem = draft.Protocol;
@@ -94,14 +96,25 @@ public sealed partial class SettingsPage : UserControl, IDisposable
             AdvertisedHostBox.Text = draft.AdvertisedHost ?? string.Empty;
             TokenBox.Password = draft.AccessToken;
             WebhookBox.Text = draft.WebhookUrls;
+            OneBotWebhookBox.Text = draft.OneBotWebhookUrls;
+            WebhookSecretBox.Password = draft.OneBotWebhookSecret;
+            WebhookTimeoutBox.Value = draft.OneBotWebhookTimeoutMilliseconds;
             ReconnectSwitch.IsOn = draft.AutoReconnect;
             ReconnectBox.Value = draft.ReconnectSeconds;
+            RateLimitBox.Value = draft.OneBotRateLimitMilliseconds;
+            HeartbeatSwitch.IsOn = draft.HeartbeatEnabled;
+            HeartbeatIntervalBox.Value = draft.HeartbeatIntervalMilliseconds;
+            HttpEventsSwitch.IsOn = draft.OneBotHttpEventsEnabled;
+            HttpEventBufferBox.Value = draft.OneBotHttpEventBufferSize;
             SelfEventsSwitch.IsOn = draft.PostSelfEvents;
             ActivePersonaBox.SelectedItem = environment.Personas.FirstOrDefault(item =>
                 item.Id == (draft.ActiveUserId ?? draft.PersonaId));
             BotPersonaBox.SelectedItem = environment.Personas.FirstOrDefault(item =>
                 item.Id == (draft.BotUserId ?? draft.PersonaId));
+            BotPersonaBox.IsEnabled = !environment.IsShowcaseMode;
             ThemeBox.SelectedItem = draft.Theme;
+            DemoModeSwitch.IsOn = environment.DemoModeEnabledForNextLaunch;
+            UpdateDemoModeState();
             ValidationInfoBar.IsOpen = false;
             UpdateCompatibility();
             UpdateEndpointPreview();
@@ -120,6 +133,7 @@ public sealed partial class SettingsPage : UserControl, IDisposable
         }
 
         _disposed = true;
+        DisposeAbout();
         _initialized = false;
         _environment = null;
         _owner = null;
@@ -136,6 +150,10 @@ public sealed partial class SettingsPage : UserControl, IDisposable
         OpenDataFolderButton.Click += OpenDataFolder_Click;
         ResetButton.Click += Reset_Click;
         SaveButton.Click += Save_Click;
+        DemoModeSwitch.Toggled += (_, _) =>
+        {
+            if (!_isLoadingDraft && !_isSaving && _initialized && !_disposed) UpdateDemoModeState();
+        };
     }
 
     private void InstallKeyboardAccelerators()
@@ -184,11 +202,13 @@ public sealed partial class SettingsPage : UserControl, IDisposable
         SettingsEditor.IsEnabled = false;
         SaveButton.IsEnabled = false;
         ResetButton.IsEnabled = false;
-        var originalSaveContent = SaveButton.Content;
         SaveButton.Content = "Saving…";
+        var settingsSaved = false;
         try
         {
             var environment = RequireEnvironment();
+            var demoEnabled = DemoModeSwitch.IsOn;
+            var restartForDemo = demoEnabled != environment.IsShowcaseMode;
             ValidationInfoBar.IsOpen = false;
             var protocol = ProtocolBox.SelectedItem is ProtocolKind selectedProtocol
                 ? selectedProtocol
@@ -202,8 +222,26 @@ public sealed partial class SettingsPage : UserControl, IDisposable
             var reconnect = double.IsFinite(ReconnectBox.Value) && ReconnectBox.Value is >= 1 and <= 60
                 ? (int)ReconnectBox.Value
                 : throw new InvalidOperationException("Reconnect delay must be between 1 and 60 seconds.");
+            var rateLimit = double.IsFinite(RateLimitBox.Value) && RateLimitBox.Value is >= 0 and <= 3_600_000
+                && Math.Truncate(RateLimitBox.Value) == RateLimitBox.Value ? (int)RateLimitBox.Value
+                : throw new InvalidOperationException("Rate limit interval must be a whole number between 0 and 3600000 ms.");
             var activePersona = ActivePersonaBox.SelectedItem as PersonaItem
                 ?? throw new InvalidOperationException("Choose a sending identity.");
+            var heartbeatInterval = double.IsFinite(HeartbeatIntervalBox.Value)
+                && HeartbeatIntervalBox.Value is >= 1 and <= int.MaxValue
+                && Math.Truncate(HeartbeatIntervalBox.Value) == HeartbeatIntervalBox.Value
+                    ? (int)HeartbeatIntervalBox.Value
+                    : throw new InvalidOperationException("Heartbeat interval must be a positive whole number of milliseconds.");
+            var webhookTimeout = double.IsFinite(WebhookTimeoutBox.Value)
+                && WebhookTimeoutBox.Value is >= 0 and <= 4_294_967_294L
+                && Math.Truncate(WebhookTimeoutBox.Value) == WebhookTimeoutBox.Value
+                    ? (long)WebhookTimeoutBox.Value
+                    : throw new InvalidOperationException("WebHook timeout must be a whole number between 0 and 4294967294 ms.");
+            var eventBufferSize = double.IsFinite(HttpEventBufferBox.Value)
+                && HttpEventBufferBox.Value is >= 0 and <= int.MaxValue
+                && Math.Truncate(HttpEventBufferBox.Value) == HttpEventBufferBox.Value
+                    ? (int)HttpEventBufferBox.Value
+                    : throw new InvalidOperationException("Event buffer size must be a nonnegative whole number.");
             var botPersona = BotPersonaBox.SelectedItem as PersonaItem
                 ?? throw new InvalidOperationException("Choose a bot account.");
             var theme = ThemeBox.SelectedItem is AppThemePreference selectedTheme
@@ -214,7 +252,7 @@ public sealed partial class SettingsPage : UserControl, IDisposable
                 Protocol = protocol,
                 Transport = protocol == ProtocolKind.Milky
                     ? TransportMode.MilkyService
-                    : transport is TransportMode.WebSocketServer or TransportMode.WebSocketClient
+                    : transport is TransportMode.WebSocketServer or TransportMode.WebSocketClient or TransportMode.OneBotHttpServer
                         ? transport
                         : _lastOneBotTransport,
                 Host = HostBox.Text,
@@ -223,37 +261,70 @@ public sealed partial class SettingsPage : UserControl, IDisposable
                 AdvertisedHost = string.IsNullOrWhiteSpace(AdvertisedHostBox.Text) ? null : AdvertisedHostBox.Text.Trim(),
                 AccessToken = TokenBox.Password,
                 WebhookUrls = WebhookBox.Text,
+                OneBotWebhookUrls = OneBotWebhookBox.Text,
+                OneBotWebhookSecret = WebhookSecretBox.Password,
+                OneBotWebhookTimeoutMilliseconds = webhookTimeout,
                 AutoReconnect = ReconnectSwitch.IsOn,
                 ReconnectSeconds = reconnect,
+                OneBotRateLimitMilliseconds = rateLimit,
+                HeartbeatEnabled = HeartbeatSwitch.IsOn,
+                HeartbeatIntervalMilliseconds = heartbeatInterval,
+                OneBotHttpEventsEnabled = HttpEventsSwitch.IsOn,
+                OneBotHttpEventBufferSize = eventBufferSize,
                 PostSelfEvents = SelfEventsSwitch.IsOn,
                 ActiveUserId = activePersona.Id,
                 BotUserId = botPersona.Id,
                 Theme = theme,
             };
-            await environment.ApplyPreferencesAsync(preferences);
+            await environment.ApplyPreferencesAsync(preferences, reconnect: !restartForDemo);
+            await environment.SaveDemoModeAsync(demoEnabled, protocol);
+            settingsSaved = true;
+            if (_disposed) return;
             LoadDraftCore();
             RootGrid.RequestedTheme = WindowChrome.ToElementTheme(environment.Preferences.Theme);
             ValidationInfoBar.Title = "Settings saved";
             ValidationInfoBar.Message = "Your changes are now active.";
             ValidationInfoBar.Severity = InfoBarSeverity.Success;
             ValidationInfoBar.IsOpen = true;
+            if (restartForDemo)
+            {
+                SaveButton.Content = "Restarting…";
+                ValidationInfoBar.Message = "Settings saved. Restarting to switch workspaces…";
+                await ((App)Application.Current).RestartForDemoModeAsync(environment.DemoModeForNextLaunch);
+            }
         }
         catch (Exception exception)
         {
-            ValidationInfoBar.Title = "Settings couldn't be saved";
+            if (_disposed) return;
+            ValidationInfoBar.Title = settingsSaved ? "Settings saved; restart needed" : "Settings couldn't be saved";
             ValidationInfoBar.Message = exception.Message;
             ValidationInfoBar.Severity = InfoBarSeverity.Error;
             ValidationInfoBar.IsOpen = true;
-            _environment?.ReportError("Settings save failed", exception);
+            _environment?.ReportError(settingsSaved ? "Restart failed" : "Settings save failed", exception);
         }
         finally
         {
-            SaveButton.Content = originalSaveContent;
-            SettingsEditor.IsEnabled = true;
-            SaveButton.IsEnabled = true;
-            ResetButton.IsEnabled = true;
             _isSaving = false;
+            if (!_disposed)
+            {
+                SettingsEditor.IsEnabled = true;
+                SaveButton.IsEnabled = true;
+                ResetButton.IsEnabled = true;
+                UpdateDemoModeState();
+            }
         }
+    }
+
+    private void UpdateDemoModeState()
+    {
+        if (_environment is not { } environment) return;
+        var needsRestart = DemoModeSwitch.IsOn != environment.IsShowcaseMode;
+        if (!_isSaving) SaveButton.Content = needsRestart ? "Save and restart" : "Save";
+        DemoModeHint.Text = needsRestart
+            ? "Save and restart to switch workspaces. Unsent message drafts will be cleared."
+            : environment.IsShowcaseMode
+                ? "Demo mode is running. Turn it off and save to return to your conversations."
+                : "Turn this on and save to start the demo. A restart is required to switch workspaces.";
     }
 
     private void Reset_Click(object sender, RoutedEventArgs e) => LoadDraft();
@@ -286,6 +357,7 @@ public sealed partial class SettingsPage : UserControl, IDisposable
             _lastOneBotTransport = transport;
         }
 
+        UpdateCompatibility();
         UpdateEndpointPreview();
     }
 
@@ -303,6 +375,18 @@ public sealed partial class SettingsPage : UserControl, IDisposable
         _isUpdatingCompatibility = true;
         try
         {
+            RateLimitBox.Visibility = protocol == ProtocolKind.OneBotV11 ? Visibility.Visible : Visibility.Collapsed;
+            HeartbeatSwitch.Visibility = HeartbeatIntervalBox.Visibility = protocol != ProtocolKind.Milky ? Visibility.Visible : Visibility.Collapsed;
+            WebhookBox.Visibility = protocol == ProtocolKind.Milky ? Visibility.Visible : Visibility.Collapsed;
+            OneBotWebhookBox.Visibility = WebhookTimeoutBox.Visibility = protocol != ProtocolKind.Milky ? Visibility.Visible : Visibility.Collapsed;
+            WebhookSecretBox.Visibility = protocol == ProtocolKind.OneBotV11 ? Visibility.Visible : Visibility.Collapsed;
+            var effectiveTransport = TransportBox.SelectedItem is TransportMode selected ? selected : _lastOneBotTransport;
+            var polling = protocol == ProtocolKind.OneBotV12 && effectiveTransport == TransportMode.OneBotHttpServer;
+            HttpEventsSwitch.Visibility = HttpEventBufferBox.Visibility = polling ? Visibility.Visible : Visibility.Collapsed;
+            var reconnect = protocol != ProtocolKind.Milky && effectiveTransport == TransportMode.WebSocketClient;
+            ReconnectSwitch.Visibility = ReconnectBox.Visibility = reconnect ? Visibility.Visible : Visibility.Collapsed;
+            PathBox.Visibility = protocol != ProtocolKind.Milky && effectiveTransport != TransportMode.OneBotHttpServer
+                ? Visibility.Visible : Visibility.Collapsed;
             if (protocol == ProtocolKind.Milky)
             {
                 if (TransportBox.SelectedItem is TransportMode mode)
@@ -341,6 +425,13 @@ public sealed partial class SettingsPage : UserControl, IDisposable
         if (ProtocolBox.SelectedItem is ProtocolKind.Milky)
         {
             EndpointPreview.Text = $"HTTP API: http://{host}:{port}/api/*    Events: ws://{host}:{port}/event\nMedia URLs: http://{advertisedHost}:{port}/assets/*";
+            return;
+        }
+
+        if (TransportBox.SelectedItem is TransportMode.OneBotHttpServer)
+        {
+            var endpoint = ProtocolBox.SelectedItem is ProtocolKind.OneBotV12 ? "POST / · get_latest_events polling" : "GET/POST /<action>";
+            EndpointPreview.Text = $"HTTP API: http://{host}:{port} · {endpoint}\nMedia URLs: http://{advertisedHost}:{port}/assets/*";
             return;
         }
 
