@@ -1,0 +1,7 @@
+# Preserve the pinned upstream SDK and license verbatim.
+native/Asuka.SilkDecoder/vendor/** -text -whitespace linguist-vendored
+native/Asuka.SilkDecoder/LICENSE.txt -text -whitespace
+
+# The showcase manifest verifies exact bytes, including text-file line endings.
+src/Asuka.App/Assets/Showcase/** -text
+src/Asuka.App/Assets/Showcase/SILK-SDK-LICENSE.txt -whitespace
