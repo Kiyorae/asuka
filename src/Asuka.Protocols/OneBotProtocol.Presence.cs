@@ -21,8 +21,8 @@ public sealed partial class OneBotProtocol
     private JsonObject StatusPayload(bool? onlineSnapshot = null)
     {
         var online = onlineSnapshot ?? IsAccountOnline;
+        // V11 good explicitly includes the QQ account being online.
         return Version == OneBotVersion.V11
-            // V11 good explicitly includes the QQ account being online.
             ? new JsonObject { ["online"] = online, ["good"] = online }
             : new JsonObject
             {

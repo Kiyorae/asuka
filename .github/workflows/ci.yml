@@ -3,14 +3,16 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   windows:
+    name: Validate Windows source
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -25,13 +27,7 @@ jobs:
 
       - name: Reject browser-engine application code
         shell: pwsh
-        run: |
-          $matches = & rg -n --glob '*.cs' --glob '*.xaml' --glob '*.csproj' --glob '!**/obj/**' --glob '!**/bin/**' '(WebView2?|BlazorWebView|CefSharp|Electron)' src
-          if ($LASTEXITCODE -eq 0) {
-            $matches | Write-Error
-            throw 'Browser-engine references are forbidden in application source.'
-          }
-          if ($LASTEXITCODE -ne 1) { throw 'Source audit failed.' }
+        run: ./scripts/check-native-ui.ps1
 
       - name: Format
         run: dotnet format Asuka.slnx --verify-no-changes --no-restore
@@ -50,15 +46,78 @@ jobs:
         run: dotnet build Asuka.slnx --no-restore -p:Platform=x64
 
       - name: Test
-        run: dotnet test tests/Asuka.Tests/Asuka.Tests.csproj --no-build --no-restore -p:Platform=x64
+        run: dotnet test tests/Asuka.Tests/Asuka.Tests.csproj --no-build --no-restore -p:Platform=x64 --logger trx --results-directory artifacts/test-results/ci
 
-      - name: Build and verify Windows 11 unsigned development MSIX
+      - name: Preserve test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results-${{ github.run_number }}
+          path: artifacts/test-results/ci/*.trx
+          if-no-files-found: ignore
+          retention-days: 7
+
+  development-packages:
+    name: Unsigned development package (${{ matrix.platform }})
+    needs: windows
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x64
+            architecture: x64
+          - platform: ARM64
+            architecture: arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build and prepare the exact unsigned development package
+        id: package
         shell: pwsh
+        env:
+          ASUKA_PLATFORM: ${{ matrix.platform }}
+          ASUKA_SOURCE_COMMIT: ${{ github.sha }}
+          ASUKA_SOURCE_REPOSITORY: ${{ github.repository }}
         run: |
-          ./scripts/package.ps1 -Platform x64 -Configuration Release -PackageVersion 0.1.0.1 -UnsignedInstallable
-          $package = Get-ChildItem -LiteralPath artifacts/msix/runs -File -Recurse -Filter '*.msix' |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-          if ($null -eq $package) { throw 'The MSIX packaging step produced no package.' }
-          $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $package.FullName).Hash
-          ./scripts/install-unsigned.ps1 -Package $package.FullName -ExpectedSha256 $sha256 -VerifyOnly
+          $ErrorActionPreference = 'Stop'
+          [xml] $props = Get-Content -LiteralPath Directory.Build.props -Raw
+          $versions = @($props.Project.PropertyGroup.AsukaVersion | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+          if ($versions.Count -ne 1) { throw 'Expected exactly one declared AsukaVersion.' }
+          # Forward build logs and keep only this invocation's structured result.
+          $records = @(& ./scripts/package.ps1 -Platform $env:ASUKA_PLATFORM -Configuration Release -PackageVersion $versions[0] -UnsignedInstallable |
+            ForEach-Object {
+              if ($null -ne $_ -and $null -ne $_.PSObject.Properties['Package']) { $_ }
+              else { Write-Host $_ }
+            })
+          if ($records.Count -ne 1) { throw 'Expected exactly one fresh package evidence record.' }
+          $prepared = ./scripts/prepare-ci-artifacts.ps1 -PackageEvidence $records[0] -Platform $env:ASUKA_PLATFORM -SourceCommit $env:ASUKA_SOURCE_COMMIT -Repository $env:ASUKA_SOURCE_REPOSITORY
+          "artifact_directory=$($prepared.ArtifactDirectory)" >> $env:GITHUB_OUTPUT
+          Write-Host "MSIX: $($prepared.Package)"
+          Write-Host "SHA-256: $($prepared.Sha256)"
+          @(
+            "### $($prepared.ArtifactName)"
+            ''
+            "Source commit: $env:ASUKA_SOURCE_COMMIT"
+            "MSIX: $($prepared.Package)"
+            "SHA-256: $($prepared.Sha256)"
+            ''
+            'Download the artifact below, extract it, and follow README-Windows.txt. Windows 11 24H2 and administrator installation are required. This is an unsigned development identity, separate from signed releases.'
+          ) >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload unsigned development package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Asuka-windows-${{ matrix.architecture }}-unsigned-dev-${{ github.run_number }}
+          path: ${{ steps.package.outputs.artifact_directory }}
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 14

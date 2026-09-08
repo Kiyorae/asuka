@@ -6,7 +6,8 @@ param(
     [Parameter(Mandatory)]
     [ValidatePattern('^[0-9A-Fa-f]{64}$')]
     [string] $ExpectedSha256,
-    [switch] $VerifyOnly
+    [switch] $VerifyOnly,
+    [switch] $SkipHostCompatibility
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,6 +15,10 @@ $developmentPublisher = 'CN=Asuka Development, OID.2.25.311729368913984317654407
 $expectedHash = $ExpectedSha256.ToUpperInvariant()
 
 function Fail([string] $Message) { throw "Unsigned MSIX installation refused: $Message" }
+
+if ($SkipHostCompatibility -and -not $VerifyOnly) {
+    Fail '-SkipHostCompatibility is only available with -VerifyOnly; installation always checks the current device.'
+}
 
 # Windows PowerShell 5.1 exposes ZipFile from the FileSystem companion
 # assembly; modern PowerShell resolves it from System.IO.Compression.
@@ -71,11 +76,16 @@ function Test-UnsignedPackage([string] $PackagePath) {
     }
     try { $minimumWindowsVersion = [version]$targetDeviceFamily.MinVersion }
     catch { Fail "package has an invalid Windows.Desktop MinVersion '$($targetDeviceFamily.MinVersion)'" }
-    if ([Environment]::OSVersion.Version -lt $minimumWindowsVersion) {
-        Fail "package requires Windows $minimumWindowsVersion or newer; this device is $([Environment]::OSVersion.Version)"
+    if ($identity.ProcessorArchitecture -notin @('x64', 'arm64')) {
+        Fail "package architecture '$($identity.ProcessorArchitecture)' is not a supported Asuka architecture"
     }
-    if (-not (Test-ArchitectureCompatible $identity.ProcessorArchitecture)) {
-        Fail "package architecture '$($identity.ProcessorArchitecture)' is not compatible with this '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' device"
+    if (-not $SkipHostCompatibility) {
+        if ([Environment]::OSVersion.Version -lt $minimumWindowsVersion) {
+            Fail "package requires Windows $minimumWindowsVersion or newer; this device is $([Environment]::OSVersion.Version)"
+        }
+        if (-not (Test-ArchitectureCompatible $identity.ProcessorArchitecture)) {
+            Fail "package architecture '$($identity.ProcessorArchitecture)' is not compatible with this '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' device"
+        }
     }
     return [pscustomobject]@{ Identity = $identity; Application = $application }
 }
@@ -171,7 +181,8 @@ function Get-StreamSha256([IO.Stream] $Stream) {
     finally { $sha.Dispose() }
 }
 
-if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or [Environment]::OSVersion.Version.Build -lt 26100) {
+if (-not $SkipHostCompatibility -and
+    ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or [Environment]::OSVersion.Version.Build -lt 26100)) {
     Fail 'Windows 11 version 24H2 (build 26100) or newer is required for this Asuka package.'
 }
 $resolvedPackage = Resolve-Path -LiteralPath $Package -ErrorAction Stop
@@ -192,7 +203,8 @@ if ($VerifyOnly) {
             EntryPoint = $evidence.Application.EntryPoint
             Signed = $false
             Sha256 = $verifyHash
-            ReadyForAllowUnsigned = $true
+            HostCompatibilityChecked = -not [bool]$SkipHostCompatibility
+            ReadyForAllowUnsigned = if ($SkipHostCompatibility) { $null } else { $true }
         }
         return
     } finally { $verifyStream.Dispose() }

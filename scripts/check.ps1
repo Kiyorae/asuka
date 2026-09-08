@@ -9,13 +9,7 @@ try {
     dotnet restore Asuka.slnx -p:Platform=x64
     if ($LASTEXITCODE -ne 0) { throw 'dotnet restore failed.' }
 
-    $forbidden = & rg -n --glob '*.cs' --glob '*.xaml' --glob '*.csproj' --glob '!**/obj/**' --glob '!**/bin/**' '(WebView2?|BlazorWebView|CefSharp|Electron)' src
-    $searchExitCode = $LASTEXITCODE
-    if ($searchExitCode -eq 0) {
-        $forbidden | Write-Error
-        throw 'Browser-engine references are forbidden in application source.'
-    }
-    if ($searchExitCode -ne 1) { throw 'Unable to audit browser-engine references.' }
+    & (Join-Path $PSScriptRoot 'check-native-ui.ps1') -RepositoryRoot $repositoryRoot
 
     dotnet format Asuka.slnx --verify-no-changes --no-restore
     if ($LASTEXITCODE -ne 0) { throw 'dotnet format verification failed.' }

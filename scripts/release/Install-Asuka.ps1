@@ -1,12 +1,17 @@
 [CmdletBinding()]
 param(
-    [switch] $VerifyOnly
+    [switch] $VerifyOnly,
+    [switch] $SkipHostCompatibility
 )
 
 $ErrorActionPreference = 'Stop'
 
 function Fail([string] $Message) {
     throw "Asuka release package refused: $Message"
+}
+
+if ($SkipHostCompatibility -and -not $VerifyOnly) {
+    Fail '-SkipHostCompatibility is only available with -VerifyOnly; installation always checks the current device.'
 }
 
 function Get-ExactlyOneFile([string] $Directory, [string] $Filter, [string] $Description) {
@@ -96,7 +101,7 @@ try {
     # invocation, preventing writes or deletion. Invoke the script file directly
     # for Windows PowerShell 5.1 compatibility and accurate nested error lines.
     if ($VerifyOnly) {
-        & $installer.FullName -Package $package.FullName -ExpectedSha256 $checksumRecords[$package.Name] -VerifyOnly
+        & $installer.FullName -Package $package.FullName -ExpectedSha256 $checksumRecords[$package.Name] -VerifyOnly -SkipHostCompatibility:$SkipHostCompatibility
     } else {
         & $installer.FullName -Package $package.FullName -ExpectedSha256 $checksumRecords[$package.Name]
     }

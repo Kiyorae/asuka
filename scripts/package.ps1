@@ -53,6 +53,48 @@ function Read-ZipEntryText([string] $PackagePath, [string] $EntryName) {
     } finally { $archive.Dispose() }
 }
 
+function Test-PackagedSilkDecoder([string] $PackagePath) {
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($PackagePath)
+    try {
+        $decoder = $archive.GetEntry('media/asuka-silk-decoder.exe')
+        if ($null -eq $decoder -or $decoder.Length -lt 64 -or $decoder.Length -gt 16MB) { Fail 'bundled SILK decoder is missing or invalid' }
+        if ($null -eq $archive.GetEntry('media/SILK-LICENSE.txt')) { Fail 'bundled SILK license is missing' }
+        $stream = $decoder.Open()
+        $buffer = [System.IO.MemoryStream]::new()
+        try { $stream.CopyTo($buffer); $bytes = $buffer.ToArray() }
+        finally { $stream.Dispose(); $buffer.Dispose() }
+        if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { Fail 'bundled SILK decoder has no DOS header' }
+        $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+        if ($peOffset -lt 64 -or $peOffset -gt $bytes.Length - 6) { Fail 'bundled SILK decoder has an invalid PE offset' }
+        if ([BitConverter]::ToUInt32($bytes, $peOffset) -ne 0x4550) { Fail 'bundled SILK decoder has no PE signature' }
+        # The native helper uses x64, including Windows 11 ARM64 emulation.
+        if ([BitConverter]::ToUInt16($bytes, $peOffset + 4) -ne 0x8664) { Fail 'bundled SILK decoder is not the expected x64 executable' }
+    } finally { $archive.Dispose() }
+}
+
+function Test-PackagedShowcase([string] $PackagePath) {
+    $showcaseManifest = Read-ZipEntryText $PackagePath 'Assets/Showcase/manifest.json' | ConvertFrom-Json
+    $showcaseArchive = [System.IO.Compression.ZipFile]::OpenRead($PackagePath)
+    try {
+        foreach ($showcaseName in @('logo.png', 'logo-spin.gif', 'voice.wav', 'voice.silk', 'notes.txt', 'SILK-SDK-LICENSE.txt')) {
+            if ($null -eq $showcaseArchive.GetEntry("Assets/Showcase/$showcaseName")) { Fail "demo asset '$showcaseName' is missing" }
+        }
+        if ($null -eq $showcaseArchive.GetEntry('Assets/Showcase/logo-spin.webm') -and
+            $null -eq $showcaseArchive.GetEntry('Assets/Showcase/logo-spin.mp4')) { Fail 'demo video is missing' }
+        foreach ($showcaseProperty in $showcaseManifest.files.PSObject.Properties) {
+            $showcaseEntry = $showcaseArchive.GetEntry("Assets/Showcase/$($showcaseProperty.Name)")
+            if ($null -eq $showcaseEntry -or $showcaseEntry.Length -ne $showcaseProperty.Value.bytes) {
+                Fail "demo asset '$($showcaseProperty.Name)' has unexpected size"
+            }
+            $showcaseStream = $showcaseEntry.Open()
+            $showcaseHasher = [System.Security.Cryptography.SHA256]::Create()
+            try { $showcaseHash = [BitConverter]::ToString($showcaseHasher.ComputeHash($showcaseStream)).Replace('-', '').ToLowerInvariant() }
+            finally { $showcaseStream.Dispose(); $showcaseHasher.Dispose() }
+            if ($showcaseHash -cne $showcaseProperty.Value.sha256) { Fail "demo asset '$($showcaseProperty.Name)' has unexpected content" }
+        }
+    } finally { $showcaseArchive.Dispose() }
+}
+
 function Test-SelfContainedMsix([string] $MsixPath, [bool] $ExpectUnsignedInstallable) {
     $entries = Get-PackageEntries $MsixPath
     [xml]$manifest = Read-ZipEntryText $MsixPath 'AppxManifest.xml'
@@ -82,6 +124,8 @@ function Test-SelfContainedMsix([string] $MsixPath, [bool] $ExpectUnsignedInstal
     foreach ($runtimeFile in @('coreclr.dll', 'hostfxr.dll', 'hostpolicy.dll', 'System.Private.CoreLib.dll')) {
         if (-not ($entries | Where-Object { $_ -ieq $runtimeFile })) { Fail "self-contained runtime file '$runtimeFile' is missing" }
     }
+    Test-PackagedSilkDecoder $MsixPath
+    Test-PackagedShowcase $MsixPath
     [pscustomobject]@{ Identity = $identity; EntryCount = $entries.Count; RuntimeConfig = $runtimeConfigs[0]; HasSignature = $hasSignature }
 }
 
@@ -104,7 +148,17 @@ if ($CertificateThumbprint) {
 
 Push-Location $repositoryRoot
 try {
-    Copy-SourceTree 'Asuka.Core'; Copy-SourceTree 'Asuka.Protocols'; Copy-SourceTree 'Asuka.App'
+    Copy-SourceTree 'Asuka.Core'
+    Copy-SourceTree 'Asuka.Protocols'
+    Copy-SourceTree 'Asuka.App'
+    # Protocols resolves ../../native and ../../scripts relative to the staged
+    # project. Stage the pinned source too, so every fresh package builds it.
+    $nativeDestination = Join-Path $outputRoot 'native\Asuka.SilkDecoder'
+    & robocopy (Join-Path $repositoryRoot 'native\Asuka.SilkDecoder') $nativeDestination /E /XD bin obj artifacts /XF '*.exe' '*.obj' /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -gt 7) { Fail 'could not stage SILK decoder source' }
+    $stagedScripts = Join-Path $outputRoot 'scripts'
+    New-Item -ItemType Directory -Path $stagedScripts | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\build-silk-decoder.ps1') -Destination $stagedScripts
     $stagedManifestPath = Join-Path $stageRoot 'Asuka.App\Package.appxmanifest'
     $stagedManifest = [System.IO.File]::ReadAllText($stagedManifestPath, [System.Text.Encoding]::UTF8)
     $identityVersionPattern = '(<Identity\s+[\s\S]*?Version=")[^"]+(")'

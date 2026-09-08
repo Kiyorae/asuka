@@ -28,6 +28,16 @@ From the extracted folder, run:
 This checks the MSIX hash, architecture, manifest identity, and unsigned-package
 requirements without installing anything.
 
+Build and release verification on a different CPU architecture may instead use:
+
+    .\Install-Asuka.ps1 -VerifyOnly -SkipHostCompatibility
+
+This checks package integrity and the manifest without comparing its Windows or
+CPU requirements with the current machine. The result reports
+HostCompatibilityChecked=False and does not assert ReadyForAllowUnsigned.
+This option requires -VerifyOnly and can never be used to install a package.
+Use the ordinary -VerifyOnly command on the actual target device before installing.
+
 Install
 -------
 Open Administrator PowerShell, change to the extracted folder, and run:

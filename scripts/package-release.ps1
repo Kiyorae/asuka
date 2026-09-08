@@ -168,10 +168,11 @@ try {
     Write-ChecksumManifest $stageRoot $releaseFiles
 
     # Exercise the public wrapper in the inbox Windows PowerShell host used by
-    # most manual installs. VerifyOnly is read-only and catches compatibility or
-    # parameter-binding failures before an archive is published.
+    # most manual installs. Cross-compilation verifies package integrity and
+    # script compatibility without requiring this build host to run that CPU
+    # architecture. Actual installation never skips device compatibility checks.
     $windowsPowerShell = Get-Command 'powershell.exe' -CommandType Application -ErrorAction Stop
-    & $windowsPowerShell.Source -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stageRoot 'Install-Asuka.ps1') -VerifyOnly
+    & $windowsPowerShell.Source -NoProfile -ExecutionPolicy Bypass -File (Join-Path $stageRoot 'Install-Asuka.ps1') -VerifyOnly -SkipHostCompatibility
     if ($LASTEXITCODE -ne 0) { Fail 'Windows PowerShell 5.1 installer verification failed' }
 
     # Compress-Archive receives only the staged root entries, so release ZIPs
