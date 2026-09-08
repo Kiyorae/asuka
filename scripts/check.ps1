@@ -14,7 +14,7 @@ try {
     dotnet format Asuka.slnx --verify-no-changes --no-restore
     if ($LASTEXITCODE -ne 0) { throw 'dotnet format verification failed.' }
 
-    dotnet restore src/Asuka.App/Asuka.App.csproj -p:Platform=ARM64
+    dotnet restore src/Asuka.App/Asuka.App.csproj -p:Platform=ARM64 -p:Configuration=Release
     if ($LASTEXITCODE -ne 0) { throw 'ARM64 restore failed.' }
 
     dotnet build src/Asuka.App/Asuka.App.csproj --configuration Release --no-restore -p:Platform=ARM64 -nodeReuse:false

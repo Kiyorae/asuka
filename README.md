@@ -92,7 +92,7 @@ Equivalent executable arguments are `--demo --demo-protocol=milky --demo-interva
 Development requires Windows 11 24H2+, the .NET SDK selected by [global.json](global.json), Windows SDK 10.0.26100, and Visual Studio C++ build tools for the bundled SILK helper. Visual Studio 2026 provides the native debugging workflow. Packages are self-contained; end users do not need the development SDKs.
 
 ```powershell
-dotnet restore Asuka.slnx -p:Platform=x64
+dotnet restore Asuka.slnx -p:Platform=x64 -p:Configuration=Release
 dotnet build Asuka.slnx --configuration Release --no-restore -p:Platform=x64
 dotnet test tests/Asuka.Tests/Asuka.Tests.csproj --configuration Release --no-restore -p:Platform=x64
 ```
